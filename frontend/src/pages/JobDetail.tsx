@@ -499,6 +499,17 @@ export default function JobDetail() {
         </div>
       )}
 
+      {hasPendingWrite() && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="transaction-status pending"
+        >
+          <span aria-hidden="true">⏳</span>
+          <span>Signing transaction… awaiting ledger confirmation</span>
+        </div>
+      )}
+
       {!escrow && !error && !loadError && <JobDetailSkeleton />}
 
       {escrow && (
@@ -966,6 +977,11 @@ export default function JobDetail() {
                 >
                   {isPending("rate") ? "Submitting…" : "Submit rating"}
                 </button>
+                {isPending("rate") && (
+                  <p role="status" aria-live="polite" className="muted" style={{ marginTop: "0.5rem" }}>
+                    Submitting rating to Stellar ledger…
+                  </p>
+                )}
               </form>
             </section>
           )}
@@ -998,30 +1014,33 @@ export default function JobDetail() {
             ) : null)}
 
           {lastHash && (
-            <p role="status" aria-live="polite">
-              Last transaction:{" "}
-              <a
-                href={explorerTxUrl(lastHash)}
-                target="_blank"
-                rel="noreferrer"
-                title={lastHash}
-              >
-                <code>{lastHash.slice(0, 12)}…</code>
-              </a>
-              {escrow && (
-                <>
-                  {" "}·{" "}
-                  <a
-                    href={explorerContractUrl(escrow.token)}
-                    target="_blank"
-                    rel="noreferrer"
-                    title={`Token contract: ${escrow.token}`}
-                  >
-                    View {symbol} contract
-                  </a>
-                </>
-              )}
-            </p>
+            <div role="status" aria-live="polite" className="transaction-status confirmed">
+              <span aria-hidden="true">✓</span>
+              <span>
+                Last transaction:{" "}
+                <a
+                  href={explorerTxUrl(lastHash)}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={lastHash}
+                >
+                  <code>{lastHash.slice(0, 12)}…</code>
+                </a>
+                {escrow && (
+                  <>
+                    {" "}·{" "}
+                    <a
+                      href={explorerContractUrl(escrow.token)}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={`Token contract: ${escrow.token}`}
+                    >
+                      View {symbol} contract
+                    </a>
+                  </>
+                )}
+              </span>
+            </div>
           )}
 
           {confirmReclaimType && (

@@ -5,7 +5,8 @@
  * such as cancelling escrows or reclaiming disputed / expired funds (issue #259).
  */
 
-import { useEffect } from "react";
+import { useRef } from "react";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 
 export interface ConfirmModalProps {
   isOpen: boolean;
@@ -34,19 +35,19 @@ export default function ConfirmModal({
   onConfirm,
   onCancel,
 }: ConfirmModalProps) {
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onCancel();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, onCancel]);
+  const modalRef = useRef<HTMLDivElement>(null);
+
+  useFocusTrap({
+    containerRef: modalRef,
+    isOpen,
+    onEscape: onCancel,
+  });
 
   if (!isOpen) return null;
 
   return (
     <div
+      ref={modalRef}
       className="modal-backdrop"
       role="dialog"
       aria-modal="true"
@@ -117,6 +118,18 @@ export default function ConfirmModal({
         <p id="confirm-modal-description" style={{ margin: "0 0 1rem 0", lineHeight: 1.5 }}>
           {description}
         </p>
+
+        {/* Accessible live status container for transaction state */}
+        {isPending ? (
+          <div role="status" aria-live="polite" className="transaction-status pending" style={{ margin: "0 0 1rem 0" }}>
+            <span aria-hidden="true">⏳</span>
+            <span>Signing transaction… awaiting ledger confirmation</span>
+          </div>
+        ) : (
+          <div role="status" aria-live="polite" className="sr-only">
+            {title}. {description}
+          </div>
+        )}
 
         {amount && (
           <div

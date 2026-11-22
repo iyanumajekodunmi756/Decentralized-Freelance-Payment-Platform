@@ -6,12 +6,13 @@
  * installed link to their install page instead of offering a dead button.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   detectWallets,
   type DetectedWallet,
   type WalletId,
 } from "../lib/wallets";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 
 export interface WalletPickerProps {
   open: boolean;
@@ -20,7 +21,14 @@ export interface WalletPickerProps {
 }
 
 export default function WalletPicker({ open, onSelect, onClose }: WalletPickerProps) {
+  const modalRef = useRef<HTMLDivElement>(null);
   const [wallets, setWallets] = useState<DetectedWallet[] | null>(null);
+
+  useFocusTrap({
+    containerRef: modalRef,
+    isOpen: open,
+    onEscape: onClose,
+  });
 
   // Probe availability each time the picker opens (an extension may have been
   // installed since the last attempt).
@@ -36,26 +44,23 @@ export default function WalletPicker({ open, onSelect, onClose }: WalletPickerPr
     };
   }, [open]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, onClose]);
-
   if (!open) return null;
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div
+        ref={modalRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="wallet-picker-title"
         className="modal card"
         onClick={(e) => e.stopPropagation()}
       >
+        <div role="status" aria-live="polite" className="sr-only">
+          {wallets === null
+            ? "Detecting wallets…"
+            : `${wallets.filter((w) => w.available).length} wallets available`}
+        </div>
         <div className="modal-header">
           <h2 id="wallet-picker-title">Connect a wallet</h2>
           <button type="button" onClick={onClose} aria-label="Close wallet picker">

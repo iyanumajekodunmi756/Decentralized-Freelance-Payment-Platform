@@ -692,3 +692,43 @@ svg {
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
+
+/* --- Accessibility & ARIA live regions (issue #260) --------------------- */
+
+/* Screen-reader-only utility for accessible live regions and labels (WCAG 2.1 AA) */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/* Transaction status live region */
+.transaction-status {
+  padding: 0.75rem 1rem;
+  border-radius: 0.5rem;
+  margin: 1rem 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.transaction-status.pending {
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid var(--accent, #3b82f6);
+  color: var(--accent-light, #93c5fd);
+}
+
+.transaction-status.confirmed {
+  background: rgba(34, 197, 94, 0.12);
+  border: 1px solid var(--success, #22c55e);
+  color: var(--success, #4ade80);
+}
+

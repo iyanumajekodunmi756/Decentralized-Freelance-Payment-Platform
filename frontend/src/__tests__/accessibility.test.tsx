@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, cleanup, fireEvent } from "@testing-library/react";
 import { BrowserRouter } from "react-router-dom";
 import Dashboard from "../pages/Dashboard";
+import ConfirmModal from "../components/ConfirmModal";
 
 // Mock dependencies for Dashboard
 const h = vi.hoisted(() => ({
@@ -69,5 +70,55 @@ describe("Accessibility and Keyboard Navigation", () => {
     expect(alert).toBeDefined();
     expect(alert.getAttribute("aria-live")).toBe("assertive");
     expect(alert.textContent).toContain("Freighter rejected connection");
+  });
+
+  it("Transaction Modals: traps keyboard focus and announces status transitions", () => {
+    const onCancel = vi.fn();
+    const { rerender } = render(
+      <ConfirmModal
+        isOpen={true}
+        title="Confirm Transaction"
+        description="Irreversible operation"
+        isPending={false}
+        onConfirm={vi.fn()}
+        onCancel={onCancel}
+      />,
+    );
+
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.getAttribute("aria-modal")).toBe("true");
+
+    const closeBtn = screen.getByRole("button", { name: "Close modal" });
+    const confirmBtn = screen.getByRole("button", { name: "Confirm" });
+
+    // Focus starts inside dialog on first focusable element
+    expect(document.activeElement).toBe(closeBtn);
+
+    // Escape closes modal
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onCancel).toHaveBeenCalledTimes(1);
+
+    // Focus trap cycling
+    confirmBtn.focus();
+    fireEvent.keyDown(window, { key: "Tab" });
+    expect(document.activeElement).toBe(closeBtn);
+
+    // Live region announcements
+    const statusRegion = screen.getByRole("status");
+    expect(statusRegion.getAttribute("aria-live")).toBe("polite");
+
+    // When status changes to pending
+    rerender(
+      <ConfirmModal
+        isOpen={true}
+        title="Confirm Transaction"
+        description="Irreversible operation"
+        isPending={true}
+        onConfirm={vi.fn()}
+        onCancel={onCancel}
+      />,
+    );
+
+    expect(screen.getByRole("status").textContent).toContain("Signing transaction… awaiting ledger confirmation");
   });
 });

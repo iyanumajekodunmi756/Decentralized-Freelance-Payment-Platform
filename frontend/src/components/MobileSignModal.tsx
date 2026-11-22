@@ -6,9 +6,10 @@
  * and polls the Stellar ledger for confirmation.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import QrCode from "./QrCode";
 import { generateSep0007Uri, getTransactionHashFromXdr, pollTransaction } from "../lib/stellar";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 
 interface MobileSignModalProps {
   xdr: string;
@@ -17,8 +18,15 @@ interface MobileSignModalProps {
 }
 
 export default function MobileSignModal({ xdr, onClose, onConfirmed }: MobileSignModalProps) {
+  const modalRef = useRef<HTMLDivElement>(null);
   const [confirmedHash, setConfirmedHash] = useState<string | null>(null);
   const [statusText, setStatusText] = useState("Waiting for mobile wallet signature…");
+
+  useFocusTrap({
+    containerRef: modalRef,
+    isOpen: true,
+    onEscape: onClose,
+  });
 
   const uri = generateSep0007Uri(xdr);
   const txHash = getTransactionHashFromXdr(xdr);
@@ -51,6 +59,7 @@ export default function MobileSignModal({ xdr, onClose, onConfirmed }: MobileSig
 
   return (
     <div
+      ref={modalRef}
       className="modal-backdrop"
       role="dialog"
       aria-modal="true"
@@ -142,6 +151,9 @@ export default function MobileSignModal({ xdr, onClose, onConfirmed }: MobileSig
         </div>
 
         <div
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
           style={{
             fontSize: "0.85rem",
             padding: "0.5rem",
