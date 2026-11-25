@@ -834,3 +834,57 @@ fn set_code_requires_admin_auth() {
     f.dispute_client()
         .set_code(&BytesN::from_array(&f.env, &[7u8; 32]));
 }
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(10_000))]
+
+    #[test]
+    fn dispute_split_conserves_the_remaining_balance(
+        balance in 1i128..=i128::MAX,
+        seed in proptest::prelude::any::<u128>(),
+        client_share in 0i128..=i128::MAX,
+        freelancer_share in 0i128..=i128::MAX,
+    ) {
+        use escrow::{validate_resolution_split, EscrowError};
+
+        let valid_client = (seed % (balance as u128 + 1)) as i128;
+        let valid_freelancer = balance - valid_client;
+        proptest::prop_assert_eq!(
+            validate_resolution_split(balance, valid_client, valid_freelancer),
+            Ok(())
+        );
+
+        // Widen the oracle so two positive i128 shares can never overflow it.
+        let proposed_total = client_share as u128 + freelancer_share as u128;
+        let expected = if proposed_total == balance as u128 {
+            Ok(())
+        } else if proposed_total > i128::MAX as u128 {
+            Err(EscrowError::Overflow)
+        } else {
+            Err(EscrowError::InvalidShares)
+        };
+        proptest::prop_assert_eq!(
+            validate_resolution_split(balance, client_share, freelancer_share),
+            expected
+        );
+        proptest::prop_assert_eq!(
+            validate_resolution_split(balance, valid_client, -1),
+            Err(EscrowError::InvalidShares)
+        );
+    }
+}
+
+#[test]
+fn split_validation_handles_i128_boundaries() {
+    use escrow::{validate_resolution_split, EscrowError};
+
+    assert_eq!(validate_resolution_split(i128::MAX, i128::MAX, 0), Ok(()));
+    assert_eq!(
+        validate_resolution_split(i128::MAX, i128::MAX - 1, 0),
+        Err(EscrowError::InvalidShares)
+    );
+    assert_eq!(
+        validate_resolution_split(i128::MAX, i128::MAX, 1),
+        Err(EscrowError::Overflow)
+    );
+}

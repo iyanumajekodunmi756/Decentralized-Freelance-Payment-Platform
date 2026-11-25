@@ -72,6 +72,24 @@ export interface ReputationView {
   count: bigint;
 }
 
+export interface DisputeContractData {
+  escrow_id: bigint;
+  escrow_contract: string;
+  raised_by: string;
+  reason: string;
+  status: string;
+  raised_at: bigint;
+  client_share: bigint;
+  freelancer_share: bigint;
+}
+
+export function normalizeDisputeStatus(status: unknown): string {
+  if (Array.isArray(status) && status.length === 1 && typeof status[0] === "string") {
+    return status[0];
+  }
+  return typeof status === "string" ? status : "Unknown";
+}
+
 /** A submitted transaction's hash plus its decoded return value. */
 export interface SubmitResult {
   hash: string;
@@ -505,17 +523,79 @@ export function useEscrow() {
     [runRead],
   );
 
+  /** Read the configured arbitrator panel (view). */
+  const getArbitrators = useCallback(
+    () =>
+      runRead(async () => {
+        try {
+          const res = await readContract<unknown[]>(CONTRACT_ADDRESSES.dispute, "arbitrators", []);
+          return (res || []).map((addr) => String(addr));
+        } catch {
+          return [];
+        }
+      }),
+    [runRead],
+  );
+
+  /** Read the required panel approval threshold (view). */
+  const getDisputeThreshold = useCallback(
+    () =>
+      runRead(async () => {
+        try {
+          const res = await readContract<number | bigint>(CONTRACT_ADDRESSES.dispute, "threshold", []);
+          return Number(res);
+        } catch {
+          return 1;
+        }
+      }),
+    [runRead],
+  );
+
+  /** Read the dispute contract data for a dispute ID (view). */
+  const getDisputeRecord = useCallback(
+    (disputeId: bigint) =>
+      runRead(async () => {
+        const raw = await readContract<DisputeContractData>(CONTRACT_ADDRESSES.dispute, "get", [
+          scU64(disputeId),
+        ]);
+        return {
+          ...raw,
+          status: normalizeDisputeStatus(raw.status),
+        };
+      }),
+    [runRead],
+  );
+
+  /** Arbitrator approves a proposed split for a dispute */
+  const approveDisputeSplit = useCallback(
+    (disputeId: bigint, clientShare: bigint, freelancerShare: bigint) =>
+      run("dispute", `${disputeId}`, (pk) =>
+        submit(
+          pk,
+          CONTRACT_ADDRESSES.dispute,
+          "approve",
+          [scU64(disputeId), scAddress(pk), scI128(clientShare), scI128(freelancerShare)],
+          "approve split",
+        ),
+      ),
+    [run, submit],
+  );
+
   return {
     createAndFund,
     releaseMilestone,
     releasePartial,
     openDispute,
+    approveDisputeSplit,
     reclaimDisputed,
     reclaimExpired,
     submitRating,
     getEscrow,
     getDisputeDeadline,
     getReputation,
+    getArbitrators,
+    getDisputeThreshold,
+    getDisputeRecord,
     pendingOps,
     isPending,
     hasPendingWrite,

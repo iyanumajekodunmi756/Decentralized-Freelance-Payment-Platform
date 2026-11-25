@@ -243,3 +243,41 @@ so active escrows and held funds are unaffected.
 2. Build and install the fixed Wasm: `NEW_HASH=$(stellar contract install --wasm contracts/target/wasm32v1-none/release/escrow.wasm --network mainnet)`.
 3. Invoke `set_code --new_wasm_hash "$NEW_HASH"` via the admin multisig (same for `dispute`).
 4. Verify with a read call (e.g. `get`) and the `code_updated` event, then `unpause`.
+
+---
+
+## 8. Database Maintenance & Index Health Procedures
+
+High write volume from the event indexer (ChainEvent, Notification, and WebhookDelivery rows) can lead to table and B-tree index fragmentation and bloat over time. Regular monitoring and routine maintenance prevent query performance degradation.
+
+### 1. Automated Health Monitoring Endpoint
+Authenticated indexer administrators can inspect live database cache hit ratios, unused indexes, and index sizes:
+```bash
+curl -H "Authorization: Bearer <ADMIN_JWT>" https://api.yourdomain.com/api/admin/db-health
+```
+The response reports:
+- status: "healthy" or "degraded"
+- cacheHitRatio: heap and index buffer cache hit percentages (target: > 99%)
+- unusedIndexes: non-unique indexes with 0 scans since last statistics reset
+- indexes: top indexes ordered by disk footprint
+
+### 2. Manual Diagnostics via SQL Script
+To execute a deep diagnostic scan directly on PostgreSQL:
+```bash
+psql "$DATABASE_URL" -f scripts/check_db_indexes.sql
+```
+
+### 3. Recommended Remediation & Routine Maintenance
+- **Routine Vacuuming & Statistics Refresh:**
+```sql
+VACUUM (ANALYZE, VERBOSE) "ChainEvent";
+VACUUM (ANALYZE, VERBOSE) "Notification";
+VACUUM (ANALYZE, VERBOSE) "Job";
+```
+- **Zero-Downtime Index Rebuilding (Reindex Concurrently):**
+```sql
+REINDEX TABLE CONCURRENTLY "ChainEvent";
+REINDEX TABLE CONCURRENTLY "Notification";
+```
+- **Pruning Unused Indexes:**
+If an index continually shows zero scans across multiple weeks of production traffic and is not backing a unique or foreign key constraint, evaluate removing it to speed up write throughput.

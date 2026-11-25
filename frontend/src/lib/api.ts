@@ -35,6 +35,139 @@ export function clearAuthToken(address?: string): void {
   else tokenCache.delete(address);
 }
 
+// ---------------------------------------------------------------------------
+// Session expiration (issue #364)
+// ---------------------------------------------------------------------------
+
+/**
+ * A request that failed with HTTP 401 and is waiting for the user to re-sign.
+ *
+ * `retry` re-issues the original request with the fresh token and resolves to
+ * the same value the original call would have returned. `reject` settles the
+ * original promise when the user dismisses the modal instead of re-signing.
+ */
+export interface SessionExpiredRequest {
+  /** The URL the failed request targeted, for display/debugging. */
+  url: string;
+  /** Re-run the original request with a fresh bearer token. */
+  retry: (token: string) => Promise<unknown>;
+  /** Settle the original promise as failed (user dismissed the modal). */
+  reject: (error: Error) => void;
+}
+
+/** A pending 401 that is waiting on the user to re-authenticate. */
+interface PendingSessionRequest {
+  request: SessionExpiredRequest;
+  resolve: (value: unknown) => void;
+  reject: (error: Error) => void;
+}
+
+/** The single in-flight 401 awaiting re-auth; concurrent 401s share one prompt. */
+let pendingSession: PendingSessionRequest | null = null;
+/** Subscribers notified when a 401 needs re-authentication. */
+const sessionExpiredListeners = new Set<(request: SessionExpiredRequest) => void>();
+
+/**
+ * Subscribe to session-expired events. Returns an unsubscribe function.
+ *
+ * `App.tsx` uses this to open the re-auth modal; the listener receives the
+ * failed request so it can retry it after the wallet signs a new challenge.
+ */
+export function onSessionExpired(
+  listener: (request: SessionExpiredRequest) => void,
+): () => void {
+  sessionExpiredListeners.add(listener);
+  return () => {
+    sessionExpiredListeners.delete(listener);
+  };
+}
+
+/**
+ * Resolve the pending 401 with a fresh token: the original request is retried
+ * and its result flows back to the caller that awaited it.
+ */
+export async function resolveSessionExpired(token: string): Promise<void> {
+  const pending = pendingSession;
+  if (!pending) return;
+  pendingSession = null;
+  try {
+    pending.resolve(await pending.request.retry(token));
+  } catch (error) {
+    pending.reject(error instanceof Error ? error : new Error(String(error)));
+  }
+}
+
+/**
+ * Abandon the pending 401 (the user dismissed the modal). The original request
+ * rejects so callers see a normal failure instead of hanging forever.
+ */
+export function rejectSessionExpired(
+  reason = "Session expired; please reconnect your wallet.",
+): void {
+  const pending = pendingSession;
+  if (!pending) return;
+  pendingSession = null;
+  pending.reject(new Error(reason));
+}
+
+/**
+ * Wrap an authenticated fetch so a 401 pauses the request, asks the app to
+ * re-authenticate, and then retries it with the fresh token.
+ *
+ * `address` is the wallet whose cached token should be dropped on 401. When it
+ * is omitted the whole cache is cleared, which is safe because a 401 means the
+ * presented token is no longer accepted.
+ */
+async function fetchWithAuth(
+  address: string | undefined,
+  url: string,
+  init: RequestInit,
+  _token?: string,
+): Promise<Response> {
+  const res = await fetch(url, init);
+  if (res.status !== 401) return res;
+
+  clearAuthToken(address);
+
+  if (sessionExpiredListeners.size === 0) {
+    return res;
+  }
+
+  // A second 401 while the modal is already open joins the existing prompt.
+  if (pendingSession) {
+    return new Promise<Response>((resolve, reject) => {
+      pendingSession!.request = {
+        url,
+        retry: async (freshToken) => {
+          const retried = await fetch(url, {
+            ...init,
+            headers: { ...(init.headers as Record<string, string>), Authorization: `Bearer ${freshToken}` },
+          });
+          return retried;
+        },
+        reject,
+      };
+      pendingSession!.resolve = resolve as (value: unknown) => void;
+    });
+  }
+
+  return new Promise<Response>((resolve, reject) => {
+    const request: SessionExpiredRequest = {
+      url,
+      retry: async (freshToken) => {
+        const retried = await fetch(url, {
+          ...init,
+          headers: { ...(init.headers as Record<string, string>), Authorization: `Bearer ${freshToken}` },
+        });
+        return retried;
+      },
+      reject,
+    };
+    pendingSession = { request, resolve: resolve as (value: unknown) => void, reject };
+    for (const listener of sessionExpiredListeners) listener(request);
+  });
+}
+
 export interface ApiErrorDetail {
   field: string;
   issue: string;
@@ -262,9 +395,12 @@ export async function fetchJobByEscrow(
 
 /** Fetch the proposals submitted for a job (issue #63). */
 export async function fetchProposals(jobId: string, token: string): Promise<ProposalApi[]> {
-  const res = await fetch(`${API_BASE_URL}/api/jobs/${encodeURIComponent(jobId)}/proposals`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetchWithAuth(
+    undefined,
+    `${API_BASE_URL}/api/jobs/${encodeURIComponent(jobId)}/proposals`,
+    { headers: { Authorization: `Bearer ${token}` } },
+    token,
+  );
   if (!res.ok) throw new Error(`Could not load proposals (HTTP ${res.status})`);
   return (await res.json()) as ProposalApi[];
 }
@@ -275,14 +411,19 @@ export async function submitProposal(
   input: { coverLetter?: string; proposedRate?: string | number },
   token: string,
 ): Promise<ProposalApi> {
-  const res = await fetch(`${API_BASE_URL}/api/jobs/${encodeURIComponent(jobId)}/proposals`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+  const res = await fetchWithAuth(
+    undefined,
+    `${API_BASE_URL}/api/jobs/${encodeURIComponent(jobId)}/proposals`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(input),
     },
-    body: JSON.stringify(input),
-  });
+    token,
+  );
   if (!res.ok) {
     const errorData = await res.json().catch(() => null);
     throw new Error(extractErrorMessage(errorData, `Could not submit proposal (HTTP ${res.status})`));
@@ -296,14 +437,19 @@ export async function assignFreelancer(
   freelancerAddress: string,
   token: string,
 ): Promise<JobApi> {
-  const res = await fetch(`${API_BASE_URL}/api/jobs/${encodeURIComponent(jobId)}/assign`, {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+  const res = await fetchWithAuth(
+    undefined,
+    `${API_BASE_URL}/api/jobs/${encodeURIComponent(jobId)}/assign`,
+    {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ freelancerAddress }),
     },
-    body: JSON.stringify({ freelancerAddress }),
-  });
+    token,
+  );
   if (!res.ok) {
     const errorData = await res.json().catch(() => null);
     throw new Error(extractErrorMessage(errorData, `Could not assign freelancer (HTTP ${res.status})`));
@@ -318,10 +464,15 @@ export async function assignFreelancer(
  * row, so a retry after a dropped response settles without a special case here.
  */
 export async function cancelJob(jobId: string, token: string): Promise<JobApi> {
-  const res = await fetch(`${API_BASE_URL}/api/jobs/${encodeURIComponent(jobId)}/cancel`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetchWithAuth(
+    undefined,
+    `${API_BASE_URL}/api/jobs/${encodeURIComponent(jobId)}/cancel`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    },
+    token,
+  );
   if (!res.ok) {
     const errorData = await res.json().catch(() => null);
     throw new Error(extractErrorMessage(errorData, `Could not cancel the job (HTTP ${res.status})`));
@@ -552,28 +703,41 @@ export interface CreateJobInput {
  * with the component it already uses for every other row.
  */
 export async function fetchSavedJobs(token: string): Promise<JobApi[]> {
-  const res = await fetch(`${API_BASE_URL}/api/jobs/saved`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetchWithAuth(
+    undefined,
+    `${API_BASE_URL}/api/jobs/saved`,
+    { headers: { Authorization: `Bearer ${token}` } },
+    token,
+  );
   if (!res.ok) throw new Error(`Could not load saved jobs (HTTP ${res.status})`);
   return (await res.json()) as JobApi[];
 }
 
 /** Bookmark a job. Idempotent on the server, so a double click is harmless. */
 export async function saveJob(jobId: string, token: string): Promise<void> {
-  const res = await fetch(`${API_BASE_URL}/api/jobs/${encodeURIComponent(jobId)}/save`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetchWithAuth(
+    undefined,
+    `${API_BASE_URL}/api/jobs/${encodeURIComponent(jobId)}/save`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    },
+    token,
+  );
   if (!res.ok) throw new Error(`Could not save the job (HTTP ${res.status})`);
 }
 
 /** Remove a bookmark. Unsaving one that was never saved is not an error. */
 export async function unsaveJob(jobId: string, token: string): Promise<void> {
-  const res = await fetch(`${API_BASE_URL}/api/jobs/${encodeURIComponent(jobId)}/save`, {
-    method: "DELETE",
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetchWithAuth(
+    undefined,
+    `${API_BASE_URL}/api/jobs/${encodeURIComponent(jobId)}/save`,
+    {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    },
+    token,
+  );
   if (!res.ok) throw new Error(`Could not remove the bookmark (HTTP ${res.status})`);
 }
 
@@ -630,14 +794,19 @@ export async function authenticate(
 
 /** Create the off-chain job record (requires a token from `authenticate`). */
 export async function createJob(input: CreateJobInput, token: string): Promise<JobApi> {
-  const res = await fetch(`${API_BASE_URL}/api/jobs`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+  const res = await fetchWithAuth(
+    undefined,
+    `${API_BASE_URL}/api/jobs`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(input),
     },
-    body: JSON.stringify(input),
-  });
+    token,
+  );
   if (!res.ok) throw new Error(`Could not save the job (HTTP ${res.status})`);
   return (await res.json()) as JobApi;
 }
@@ -648,14 +817,19 @@ export async function linkEscrowId(
   escrowId: number,
   token: string,
 ): Promise<void> {
-  const res = await fetch(`${API_BASE_URL}/api/escrow/sync/${jobId}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+  const res = await fetchWithAuth(
+    undefined,
+    `${API_BASE_URL}/api/escrow/sync/${jobId}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ escrowId }),
     },
-    body: JSON.stringify({ escrowId }),
-  });
+    token,
+  );
   if (!res.ok) throw new Error(`Could not link the escrow (HTTP ${res.status})`);
 }
 
@@ -691,14 +865,19 @@ export async function submitRating(
   input: SubmitRatingInput,
   token: string,
 ): Promise<{ rating: SubmittedRating; xdr: string }> {
-  const res = await fetch(`${API_BASE_URL}/api/reputation`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+  const res = await fetchWithAuth(
+    undefined,
+    `${API_BASE_URL}/api/reputation`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(input),
     },
-    body: JSON.stringify(input),
-  });
+    token,
+  );
   if (!res.ok) throw new Error(`Could not record the rating (HTTP ${res.status})`);
   return (await res.json()) as { rating: SubmittedRating; xdr: string };
 }
@@ -730,14 +909,19 @@ export async function createDispute(
   input: { jobId: string; reason: string },
   token: string,
 ): Promise<{ dispute: DisputeApi; xdr: string }> {
-  const res = await fetch(`${API_BASE_URL}/api/disputes`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+  const res = await fetchWithAuth(
+    undefined,
+    `${API_BASE_URL}/api/disputes`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(input),
     },
-    body: JSON.stringify(input),
-  });
+    token,
+  );
   if (!res.ok) throw new Error(`Could not record the dispute (HTTP ${res.status})`);
   return (await res.json()) as { dispute: DisputeApi; xdr: string };
 }
@@ -755,14 +939,19 @@ export async function linkDisputeId(
   onChainId: number | bigint,
   token: string,
 ): Promise<DisputeApi> {
-  const res = await fetch(`${API_BASE_URL}/api/disputes/${disputeId}/sync`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+  const res = await fetchWithAuth(
+    undefined,
+    `${API_BASE_URL}/api/disputes/${disputeId}/sync`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ onChainId: Number(onChainId) }),
     },
-    body: JSON.stringify({ onChainId: Number(onChainId) }),
-  });
+    token,
+  );
   if (!res.ok) throw new Error(`Could not record the dispute id (HTTP ${res.status})`);
   return (await res.json()) as DisputeApi;
 }
@@ -801,9 +990,11 @@ export async function fetchDisputeEvidence(
   disputeId: string,
   token: string,
 ): Promise<DisputeEvidenceApi[]> {
-  const res = await fetch(
+  const res = await fetchWithAuth(
+    undefined,
     `${API_BASE_URL}/api/disputes/${encodeURIComponent(disputeId)}/evidence`,
     { headers: { Authorization: `Bearer ${token}` } },
+    token,
   );
   if (!res.ok) throw new Error(`Could not load dispute evidence (HTTP ${res.status})`);
   return (await res.json()) as DisputeEvidenceApi[];
@@ -815,7 +1006,8 @@ export async function addDisputeEvidence(
   input: AddDisputeEvidenceInput,
   token: string,
 ): Promise<DisputeEvidenceApi> {
-  const res = await fetch(
+  const res = await fetchWithAuth(
+    undefined,
     `${API_BASE_URL}/api/disputes/${encodeURIComponent(disputeId)}/evidence`,
     {
       method: "POST",
@@ -825,6 +1017,7 @@ export async function addDisputeEvidence(
       },
       body: JSON.stringify(input),
     },
+    token,
   );
   if (!res.ok) {
     const errorData = await res.json().catch(() => null);
@@ -859,12 +1052,14 @@ export async function fetchNotifications(
   unreadOnly = false,
   signal?: AbortSignal,
 ): Promise<NotificationsResponse> {
-  const res = await fetch(
+  const res = await fetchWithAuth(
+    undefined,
     `${API_BASE_URL}/api/notifications${unreadOnly ? "?unread=true" : ""}`,
     {
       headers: { Authorization: `Bearer ${token}` },
       signal,
     },
+    token,
   );
   if (!res.ok) throw new Error(`Could not load notifications (HTTP ${res.status})`);
   return (await res.json()) as NotificationsResponse;
@@ -875,20 +1070,30 @@ export async function markNotificationRead(
   token: string,
   notificationId: string,
 ): Promise<NotificationApi> {
-  const res = await fetch(`${API_BASE_URL}/api/notifications/${notificationId}/read`, {
-    method: "PATCH",
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetchWithAuth(
+    undefined,
+    `${API_BASE_URL}/api/notifications/${notificationId}/read`,
+    {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${token}` },
+    },
+    token,
+  );
   if (!res.ok) throw new Error(`Could not mark notification as read (HTTP ${res.status})`);
   return (await res.json()) as NotificationApi;
 }
 
 /** Mark all notifications for the user as read. */
 export async function markAllNotificationsRead(token: string): Promise<void> {
-  const res = await fetch(`${API_BASE_URL}/api/notifications/read-all`, {
-    method: "PATCH",
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetchWithAuth(
+    undefined,
+    `${API_BASE_URL}/api/notifications/read-all`,
+    {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${token}` },
+    },
+    token,
+  );
   if (!res.ok) throw new Error(`Could not mark all notifications as read (HTTP ${res.status})`);
 }
 
@@ -990,9 +1195,12 @@ export interface UnreadCounts {
  * third party gets a 403 from the API.
  */
 export async function fetchMessages(jobId: string, token: string): Promise<MessageApi[]> {
-  const res = await fetch(`${API_BASE_URL}/api/messages/${encodeURIComponent(jobId)}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetchWithAuth(
+    undefined,
+    `${API_BASE_URL}/api/messages/${encodeURIComponent(jobId)}`,
+    { headers: { Authorization: `Bearer ${token}` } },
+    token,
+  );
   if (!res.ok) throw new Error(`Could not load the conversation (HTTP ${res.status})`);
   return (await res.json()) as MessageApi[];
 }
@@ -1003,23 +1211,30 @@ export async function sendMessage(
   body: string,
   token: string,
 ): Promise<MessageApi> {
-  const res = await fetch(`${API_BASE_URL}/api/messages/${encodeURIComponent(jobId)}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+  const res = await fetchWithAuth(
+    undefined,
+    `${API_BASE_URL}/api/messages/${encodeURIComponent(jobId)}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ body }),
     },
-    body: JSON.stringify({ body }),
-  });
+    token,
+  );
   if (!res.ok) throw new Error(`Could not send the message (HTTP ${res.status})`);
   return (await res.json()) as MessageApi;
 }
 
 /** Mark the other party's messages in this job read; returns how many changed. */
 export async function markMessagesRead(jobId: string, token: string): Promise<number> {
-  const res = await fetch(
+  const res = await fetchWithAuth(
+    undefined,
     `${API_BASE_URL}/api/messages/${encodeURIComponent(jobId)}/read`,
     { method: "POST", headers: { Authorization: `Bearer ${token}` } },
+    token,
   );
   if (!res.ok) throw new Error(`Could not update read state (HTTP ${res.status})`);
   const { markedRead } = (await res.json()) as { markedRead: number };
@@ -1028,9 +1243,12 @@ export async function markMessagesRead(jobId: string, token: string): Promise<nu
 
 /** Total unread messages, plus one count per job, for the authenticated user. */
 export async function fetchUnreadCounts(token: string): Promise<UnreadCounts> {
-  const res = await fetch(`${API_BASE_URL}/api/messages/unread`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetchWithAuth(
+    undefined,
+    `${API_BASE_URL}/api/messages/unread`,
+    { headers: { Authorization: `Bearer ${token}` } },
+    token,
+  );
   if (!res.ok) throw new Error(`Could not load unread counts (HTTP ${res.status})`);
   return (await res.json()) as UnreadCounts;
 }
@@ -1051,7 +1269,8 @@ export async function uploadDeliverable(
   },
   token: string,
 ): Promise<DeliverableApi> {
-  const res = await fetch(
+  const res = await fetchWithAuth(
+    undefined,
     `${API_BASE_URL}/api/milestones/${encodeURIComponent(milestoneId)}/deliverables`,
     {
       method: "POST",
@@ -1061,6 +1280,7 @@ export async function uploadDeliverable(
       },
       body: JSON.stringify(input),
     },
+    token,
   );
   if (!res.ok) {
     const errorData = await res.json().catch(() => null);
@@ -1082,7 +1302,8 @@ export async function uploadJobMilestoneDeliverable(
   },
   token: string,
 ): Promise<DeliverableApi> {
-  const res = await fetch(
+  const res = await fetchWithAuth(
+    undefined,
     `${API_BASE_URL}/api/jobs/${encodeURIComponent(jobId)}/milestones/${milestoneIndex}/deliverables`,
     {
       method: "POST",
@@ -1092,6 +1313,7 @@ export async function uploadJobMilestoneDeliverable(
       },
       body: JSON.stringify(input),
     },
+    token,
   );
   if (!res.ok) {
     const errorData = await res.json().catch(() => null);
@@ -1105,9 +1327,11 @@ export async function fetchMilestoneDeliverables(
   milestoneId: string,
   token: string,
 ): Promise<DeliverableApi[]> {
-  const res = await fetch(
+  const res = await fetchWithAuth(
+    undefined,
     `${API_BASE_URL}/api/milestones/${encodeURIComponent(milestoneId)}/deliverables`,
     { headers: { Authorization: `Bearer ${token}` } },
+    token,
   );
   if (!res.ok) throw new Error(`Could not load deliverables (HTTP ${res.status})`);
   return (await res.json()) as DeliverableApi[];
@@ -1119,9 +1343,11 @@ export async function fetchJobMilestoneDeliverables(
   milestoneIndex: number,
   token: string,
 ): Promise<DeliverableApi[]> {
-  const res = await fetch(
+  const res = await fetchWithAuth(
+    undefined,
     `${API_BASE_URL}/api/jobs/${encodeURIComponent(jobId)}/milestones/${milestoneIndex}/deliverables`,
     { headers: { Authorization: `Bearer ${token}` } },
+    token,
   );
   if (!res.ok) throw new Error(`Could not load deliverables (HTTP ${res.status})`);
   return (await res.json()) as DeliverableApi[];
@@ -1167,14 +1393,19 @@ export async function updateUserProfile(
   input: UpdateUserProfileInput,
   token: string,
 ): Promise<UserProfileApi> {
-  const res = await fetch(`${API_BASE_URL}/api/users/me`, {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+  const res = await fetchWithAuth(
+    undefined,
+    `${API_BASE_URL}/api/users/me`,
+    {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(input),
     },
-    body: JSON.stringify(input),
-  });
+    token,
+  );
   if (!res.ok) throw new Error(`Could not update profile (HTTP ${res.status})`);
   return (await res.json()) as UserProfileApi;
 }
@@ -1185,14 +1416,19 @@ export async function verifyJob(
   data: { isVerified: boolean; verificationSource?: string | null },
   token: string,
 ): Promise<JobApi> {
-  const res = await fetch(`${API_BASE_URL}/api/jobs/${encodeURIComponent(jobId)}/verify`, {
-    method: "PATCH",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+  const res = await fetchWithAuth(
+    undefined,
+    `${API_BASE_URL}/api/jobs/${encodeURIComponent(jobId)}/verify`,
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(data),
     },
-    body: JSON.stringify(data),
-  });
+    token,
+  );
   if (!res.ok) throw new Error(`Could not update verification status (HTTP ${res.status})`);
   return (await res.json()) as JobApi;
 }

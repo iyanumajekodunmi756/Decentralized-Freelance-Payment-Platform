@@ -96,6 +96,66 @@ describe("Conversation", () => {
     expect(screen.queryByText(/unread/)).toBeNull();
   });
 
+  describe("Redundant markMessagesRead prevention (Issue #254)", () => {
+    it("does not call markMessagesRead when there are no unread counterparty messages", async () => {
+      h.fetchMessages.mockResolvedValue([
+        message({ id: "m1", sender: { stellarAddress: OTHER }, readAt: "2026-01-01T00:00:00.000Z", body: "Message from other" }),
+        message({ id: "m2", sender: { stellarAddress: ME }, readAt: null, body: "Message from me" }),
+      ]);
+
+      render(<Conversation jobId="job-1" />);
+
+      await screen.findByText("Message from other");
+      expect(h.markMessagesRead).not.toHaveBeenCalled();
+    });
+
+    it("does not trigger markMessagesRead on polling cycles if no new unread messages arrived", async () => {
+      vi.useFakeTimers();
+      h.fetchMessages.mockResolvedValue([
+        message({ id: "m1", sender: { stellarAddress: OTHER }, readAt: "2026-01-01T00:00:00.000Z", body: "Already read" }),
+      ]);
+
+      render(<Conversation jobId="job-1" />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(h.markMessagesRead).not.toHaveBeenCalled();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+
+      expect(h.markMessagesRead).not.toHaveBeenCalled();
+      vi.useRealTimers();
+    });
+
+    it("triggers markMessagesRead during polling when a new unread counterparty message arrives", async () => {
+      vi.useFakeTimers();
+      h.fetchMessages.mockResolvedValueOnce([
+        message({ id: "m1", sender: { stellarAddress: OTHER }, readAt: "2026-01-01T00:00:00.000Z", body: "Already read" }),
+      ]);
+
+      render(<Conversation jobId="job-1" />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(h.markMessagesRead).not.toHaveBeenCalled();
+
+      h.fetchMessages.mockResolvedValueOnce([
+        message({ id: "m1", sender: { stellarAddress: OTHER }, readAt: "2026-01-01T00:00:00.000Z", body: "Already read" }),
+        message({ id: "m2", sender: { stellarAddress: OTHER }, readAt: null, body: "New unread message" }),
+      ]);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+
+      expect(h.markMessagesRead).toHaveBeenCalledTimes(1);
+      expect(h.markMessagesRead).toHaveBeenCalledWith("job-1", "jwt-1");
+      vi.useRealTimers();
+    });
+  });
+
   it("sends a message and shows it in the thread", async () => {
     h.fetchMessages.mockResolvedValue([]);
     h.sendMessage.mockResolvedValue(message({ id: "m9", body: "Starting on it now", senderId: "user-me" }));
@@ -233,6 +293,88 @@ describe("Conversation", () => {
 
       // Should not have auto-scrolled because user is reading history
       expect(scrollIntoViewMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("Real-time SSE Gateway (Issue #250)", () => {
+    class MockEventSource {
+      static instances: MockEventSource[] = [];
+      url: string;
+      onmessage: ((ev: MessageEvent) => void) | null = null;
+      onerror: (() => void) | null = null;
+      close = vi.fn();
+
+      constructor(url: string) {
+        this.url = url;
+        MockEventSource.instances.push(this);
+      }
+    }
+
+    beforeEach(() => {
+      MockEventSource.instances = [];
+      vi.stubGlobal("EventSource", MockEventSource);
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it("connects to the SSE stream with authenticated token", async () => {
+      h.fetchMessages.mockResolvedValue([]);
+
+      render(<Conversation jobId="job-1" />);
+
+      await waitFor(() => {
+        expect(MockEventSource.instances.length).toBe(1);
+        expect(MockEventSource.instances[0].url).toContain("/api/messages/job-1/stream?token=jwt-1");
+      });
+    });
+
+    it("receives incoming messages via SSE in real time and marks counterparty message as read", async () => {
+      h.fetchMessages.mockResolvedValue([]);
+
+      render(<Conversation jobId="job-1" />);
+      await screen.findByText("No messages yet.");
+
+      await waitFor(() => {
+        expect(MockEventSource.instances.length).toBe(1);
+      });
+
+      const sse = MockEventSource.instances[0];
+      const incoming = message({
+        id: "m-sse-1",
+        body: "Real-time message delivered instantaneously",
+        sender: { stellarAddress: OTHER },
+      });
+
+      act(() => {
+        sse.onmessage?.(new MessageEvent("message", { data: JSON.stringify(incoming) }));
+      });
+
+      expect(await screen.findByText("Real-time message delivered instantaneously")).toBeTruthy();
+      await waitFor(() => {
+        expect(h.markMessagesRead).toHaveBeenCalledWith("job-1", "jwt-1");
+      });
+    });
+
+    it("falls back gracefully when SSE fails without throwing an error", async () => {
+      h.fetchMessages.mockResolvedValue([]);
+
+      render(<Conversation jobId="job-1" />);
+      await screen.findByText("No messages yet.");
+
+      await waitFor(() => {
+        expect(MockEventSource.instances.length).toBe(1);
+      });
+
+      const sse = MockEventSource.instances[0];
+      act(() => {
+        sse.onerror?.();
+      });
+
+      expect(sse.close).toHaveBeenCalled();
+      // Conversation continues functioning normally
+      expect(screen.queryByRole("alert")).toBeNull();
     });
   });
 });

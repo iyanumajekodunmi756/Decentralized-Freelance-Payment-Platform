@@ -3,6 +3,8 @@ import {
   computeWebhookSignature,
   deliverWebhookWithRetry,
   dispatchWebhooksForEvent,
+  processPendingWebhookDeliveries,
+  startWebhookRetryWorker,
   type WebhookStore,
 } from "../lib/webhooks";
 
@@ -162,4 +164,165 @@ describe("Webhook delivery and signature (issue #313)", () => {
     expect(calledUrls).toContain("https://service-c.com/hook");
     expect(calledUrls).not.toContain("https://service-b.com/hook");
   });
+
+  describe("Automated webhook retry worker and dead-letter queue (issue #379)", () => {
+    it("records failed webhook deliveries into store with status PENDING_RETRY", async () => {
+      const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 502, statusText: "Bad Gateway" });
+      const createdDeliveries: any[] = [];
+
+      const mockStore: WebhookStore = {
+        webhookSubscription: {
+          findMany: vi.fn().mockResolvedValue([
+            {
+              id: "sub-fail-1",
+              url: "https://downstream-service.example/webhook",
+              secret: "sec-retry",
+              events: ["*"],
+              isActive: true,
+            },
+          ]),
+        },
+        webhookDelivery: {
+          create: vi.fn().mockImplementation(async (args) => {
+            createdDeliveries.push(args.data);
+            return { id: "del-1", ...args.data };
+          }),
+          findMany: vi.fn(),
+          update: vi.fn(),
+        },
+      };
+
+      await dispatchWebhooksForEvent(
+        "escrow.funded",
+        { escrowId: "200" },
+        mockStore,
+        {
+          fetchFn: mockFetch as unknown as typeof fetch,
+          maxRetries: 2,
+          initialDelayMs: 1,
+        },
+      );
+
+      expect(mockStore.webhookDelivery?.create).toHaveBeenCalledTimes(1);
+      expect(createdDeliveries).toHaveLength(1);
+      expect(createdDeliveries[0].status).toBe("PENDING_RETRY");
+      expect(createdDeliveries[0].subscriptionId).toBe("sub-fail-1");
+      expect(createdDeliveries[0].attempts).toBe(2);
+      expect(createdDeliveries[0].responseCode).toBe(502);
+      expect(createdDeliveries[0].nextRetryAt).toBeInstanceOf(Date);
+    });
+
+    it("retries pending deliveries and updates status to SUCCESS when delivery succeeds", async () => {
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true, status: 200, statusText: "OK" });
+      const updatedDeliveries: any[] = [];
+
+      const mockStore: WebhookStore = {
+        webhookDelivery: {
+          create: vi.fn(),
+          findMany: vi.fn().mockResolvedValue([
+            {
+              id: "del-pending-1",
+              url: "https://recovering-service.example/webhook",
+              secret: "secret-recover",
+              event: "milestone.approved",
+              payload: JSON.stringify({ event: "milestone.approved" }),
+              status: "PENDING_RETRY",
+              attempts: 2,
+              maxAttempts: 5,
+              nextRetryAt: new Date(Date.now() - 5000),
+            },
+          ]),
+          update: vi.fn().mockImplementation(async (args) => {
+            updatedDeliveries.push(args);
+            return args;
+          }),
+        },
+      };
+
+      const result = await processPendingWebhookDeliveries(mockStore, {
+        fetchFn: mockFetch as unknown as typeof fetch,
+      });
+
+      expect(result.processed).toBe(1);
+      expect(result.succeeded).toBe(1);
+      expect(result.deadLettered).toBe(0);
+      expect(mockStore.webhookDelivery?.update).toHaveBeenCalledWith({
+        where: { id: "del-pending-1" },
+        data: expect.objectContaining({
+          status: "SUCCESS",
+          attempts: 3,
+          responseCode: 200,
+        }),
+      });
+    });
+
+    it("transitions exhausted deliveries to DEAD_LETTER after exceeding maxAttempts", async () => {
+      const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 504, statusText: "Gateway Timeout" });
+      const updatedDeliveries: any[] = [];
+
+      const mockStore: WebhookStore = {
+        webhookDelivery: {
+          create: vi.fn(),
+          findMany: vi.fn().mockResolvedValue([
+            {
+              id: "del-exhausted-1",
+              url: "https://dead-service.example/webhook",
+              secret: "secret-dead",
+              event: "dispute.resolved",
+              payload: JSON.stringify({ event: "dispute.resolved" }),
+              status: "PENDING_RETRY",
+              attempts: 4,
+              maxAttempts: 5,
+              nextRetryAt: new Date(Date.now() - 10000),
+            },
+          ]),
+          update: vi.fn().mockImplementation(async (args) => {
+            updatedDeliveries.push(args);
+            return args;
+          }),
+        },
+      };
+
+      const result = await processPendingWebhookDeliveries(mockStore, {
+        fetchFn: mockFetch as unknown as typeof fetch,
+        maxAttempts: 5,
+      });
+
+      expect(result.processed).toBe(1);
+      expect(result.deadLettered).toBe(1);
+      expect(result.succeeded).toBe(0);
+      expect(mockStore.webhookDelivery?.update).toHaveBeenCalledWith({
+        where: { id: "del-exhausted-1" },
+        data: expect.objectContaining({
+          status: "DEAD_LETTER",
+          attempts: 5,
+          responseCode: 504,
+        }),
+      });
+    });
+
+    it("starts and stops background retry worker handle cleanly", async () => {
+      const mockStore: WebhookStore = {
+        webhookDelivery: {
+          create: vi.fn(),
+          findMany: vi.fn().mockResolvedValue([]),
+          update: vi.fn(),
+        },
+      };
+
+      const worker = startWebhookRetryWorker({
+        store: mockStore,
+        intervalMs: 10000,
+      });
+
+      expect(worker.stop).toBeInstanceOf(Function);
+      expect(worker.processOnce).toBeInstanceOf(Function);
+
+      const runResult = await worker.processOnce();
+      expect(runResult.processed).toBe(0);
+
+      worker.stop();
+    });
+  });
+
 });

@@ -39,7 +39,7 @@ webhooksRouter.post(
   async (req, res, next) => {
     try {
       const { url, events } = req.body;
-      const secret = req.body.secret ?? crypto.randomBytes(24).toString("hex");
+      const secret = req.body.secret ?? crypto.randomBytes(32).toString("hex");
 
       let userId: string | undefined;
       if (res.locals.stellarAddress) {
@@ -72,7 +72,7 @@ webhooksRouter.get("/", optionalAuth, async (_req, res, next) => {
     const subscriptions = await prisma.webhookSubscription.findMany({
       orderBy: { createdAt: "desc" },
     });
-    res.json(subscriptions);
+    res.json(subscriptions.map(({ secret: _secret, ...subscription }) => subscription));
   } catch (err) {
     next(err);
   }
@@ -87,7 +87,8 @@ webhooksRouter.get("/:id", async (req, res, next) => {
     if (!subscription) {
       throw new AppError(404, "Webhook subscription not found");
     }
-    res.json(subscription);
+    const { secret: _secret, ...publicSubscription } = subscription;
+    res.json(publicSubscription);
   } catch (err) {
     next(err);
   }

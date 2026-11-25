@@ -22,6 +22,11 @@ pub enum EscrowStatus {
     Completed,
     Disputed,
     Refunded,
+    /// Closed by the client before any funds were deposited.
+    ///
+    /// Appended last so the existing variants keep their XDR discriminants and
+    /// already-deployed clients keep decoding them.
+    Cancelled,
 }
 
 #[contracttype]

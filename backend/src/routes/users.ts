@@ -59,18 +59,22 @@ const secret = new TextEncoder().encode(config.JWT_SECRET);
 // `prisma.authNonce` structurally satisfies the store interface.
 const nonceStore = prisma.authNonce as unknown as AuthNonceStore;
 
-// GET /api/users/challenge?address=G...
-usersRouter.get("/challenge", async (req, res, next) => {
+export const challengeSchema = z.object({ address: z.string().refine(isValidStellarAddress) });
+
+async function sendChallenge(req: Request, res: Response, next: NextFunction) {
   try {
-    const address = String(req.query.address ?? "");
+    const address = req.method === "POST" ? req.body.address : String(req.query.address ?? "");
     if (!isValidStellarAddress(address)) throw new AppError(400, "Invalid Stellar address");
 
     const nonce = await issueNonce(nonceStore, address);
-    res.json({ nonce });
+    res.set("Cache-Control", "no-store").json({ nonce });
   } catch (err) {
     next(err);
   }
-});
+}
+
+usersRouter.get("/challenge", sendChallenge);
+usersRouter.post("/challenge", validate(challengeSchema), sendChallenge);
 
 // POST /api/users/auth
 export const authSchema = z.object({

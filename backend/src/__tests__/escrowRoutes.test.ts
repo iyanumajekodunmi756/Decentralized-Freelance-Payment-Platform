@@ -70,16 +70,12 @@ vi.mock("../lib/escrowArgs", async (importOriginal) => {
 vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@stellar/stellar-sdk")>();
 
-  // The real pipeline needs a funded account and a live RPC node; these tests
-  // only need to know whether the handler got far enough to build a call.
-  class FakeServer {
-    async getAccount(address: string) {
-      return new actual.Account(address, "1");
-    }
+  const { MockSorobanRpcServer } = await import("../test/mockRpc");
 
+  class TestServer extends MockSorobanRpcServer {
     async simulateTransaction(tx: unknown) {
       builtTxs.push(tx);
-      return { result: { retval: actual.xdr.ScVal.scvVoid() } };
+      return super.simulateTransaction(tx);
     }
   }
 
@@ -87,7 +83,7 @@ vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
     ...actual,
     SorobanRpc: {
       ...actual.SorobanRpc,
-      Server: FakeServer,
+      Server: TestServer,
       assembleTransaction: () => ({ build: () => ({ toXDR: () => "assembled-xdr" }) }),
     },
   };

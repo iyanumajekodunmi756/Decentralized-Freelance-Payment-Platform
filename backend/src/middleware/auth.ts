@@ -23,6 +23,30 @@ export interface AuthLocals {
   stellarAddress: string;
 }
 
+export async function verifyAuthToken(token: string): Promise<string> {
+  const { payload } = await jwtVerify(token, secret);
+  if (typeof payload.sub !== "string") throw new Error();
+
+  const tokenVersion = typeof payload.v === "number" ? payload.v : 0;
+  const user = await prisma.user.findUnique({
+    where: { stellarAddress: payload.sub },
+    select: { id: true, sessions: { select: { tokenVersion: true }, take: 1 } },
+  });
+
+  if (!user) {
+    throw new AppError(401, "User not found");
+  }
+
+  if (user.sessions.length > 0) {
+    const latestSession = user.sessions[0];
+    if (tokenVersion < latestSession.tokenVersion) {
+      throw new AppError(401, "Token has been revoked");
+    }
+  }
+
+  return payload.sub;
+}
+
 export const requireAuth: RequestHandler = async (req, res, next) => {
   const header = req.headers.authorization;
   if (!header?.startsWith("Bearer ")) {
@@ -30,29 +54,8 @@ export const requireAuth: RequestHandler = async (req, res, next) => {
   }
   try {
     const token = header.slice(7);
-    const { payload } = await jwtVerify(token, secret);
-    if (typeof payload.sub !== "string") throw new Error();
-    
-    // Check if token is revoked by comparing its version against the current session version
-    const tokenVersion = typeof payload.v === "number" ? payload.v : 0;
-    const user = await prisma.user.findUnique({
-      where: { stellarAddress: payload.sub },
-      select: { id: true, sessions: { select: { tokenVersion: true }, take: 1 } },
-    });
-    
-    if (!user) {
-      throw new AppError(401, "User not found");
-    }
-    
-    // If user has active sessions, validate token version
-    if (user.sessions.length > 0) {
-      const latestSession = user.sessions[0];
-      if (tokenVersion < latestSession.tokenVersion) {
-        throw new AppError(401, "Token has been revoked");
-      }
-    }
-    
-    res.locals.stellarAddress = payload.sub;
+    const sub = await verifyAuthToken(token);
+    res.locals.stellarAddress = sub;
     next();
   } catch (err) {
     if (err instanceof AppError) {

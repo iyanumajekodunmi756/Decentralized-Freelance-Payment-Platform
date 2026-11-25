@@ -162,7 +162,7 @@ export async function createRedisClient(
   });
 
   // Handle connection errors
-  client.on("error", (err) => {
+  client.on("error", (err: unknown) => {
     console.error("[Redis] Connection error:", err);
   });
 

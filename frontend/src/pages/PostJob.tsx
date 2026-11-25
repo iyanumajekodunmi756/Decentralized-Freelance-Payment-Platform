@@ -28,6 +28,8 @@ import { useWallet } from "../hooks/wallet-context";
 import { ASSETS, formatAmount, getAsset, toBaseUnits } from "../lib/assets";
 import { authenticate, createJob, linkEscrowId } from "../lib/api";
 import { freelancerFromInvite } from "../lib/invite";
+import { estimateFiat } from "../lib/prices";
+import { useFiatRates } from "../hooks/useFiatRates";
 import { MAX_JOB_TAGS, tagsByCategory } from "../lib/tags";
 import { CONTRACT_ADDRESSES, explorerTxUrl } from "../lib/stellar";
 import {
@@ -140,6 +142,7 @@ export default function PostJob() {
   const [templateNote, setTemplateNote] = useState<string | null>(null);
 
   const asset = getAsset(assetSymbol);
+  const rates = useFiatRates();
 
   // Save draft to localStorage whenever form state changes
   useEffect(() => {
@@ -218,6 +221,18 @@ export default function PostJob() {
   const total = formatAmount(
     rows.reduce((sum, r) => sum + amountToBaseUnits(r.amount, asset.decimals), 0n),
     asset.decimals,
+  );
+
+  // Live USD estimate for the whole job: sum each row's fiat value so the total
+  // tracks milestone additions, edits and removals. `estimateFiat` returns null
+  // for assets without a price id or a known rate, so unsupported assets simply
+  // show no estimate instead of breaking the form.
+  const totalUsd = rows.reduce((sum, r) => {
+    const value = estimateFiat(r.amount, asset.symbol, rates);
+    return value === null ? sum : sum + value;
+  }, 0);
+  const hasUsdEstimate = rows.some(
+    (r) => estimateFiat(r.amount, asset.symbol, rates) !== null,
   );
 
   /** Milestones with a usable amount, in the asset's base units. */
@@ -612,7 +627,10 @@ export default function PostJob() {
                   onChange={(e) => updateRow(i, e.target.value)}
                   required
                 />
-              </label>{" "}
+              </label>
+              <div className="muted" style={{ fontSize: "0.85rem" }}>
+                <FiatEstimate amount={row.amount} asset={asset.symbol} />
+              </div>{" "}
               <label htmlFor={`milestone-deadline-${i}`} style={{ marginLeft: "0.5rem" }}>
                 Target deadline #{i + 1}{" "}
                 <input
@@ -653,7 +671,13 @@ export default function PostJob() {
             <p className="muted">Maximum of {MAX_MILESTONES} milestones reached.</p>
           )}
           <p>
-            Total: <strong>{total}</strong> {asset.symbol}{" "}
+            Total: <strong>{total}</strong> {asset.symbol}
+            {hasUsdEstimate && (
+              <>
+                {" "}
+                (≈ <strong>${totalUsd.toFixed(2)}</strong> USD)
+              </>
+            )}{" "}
             <FiatEstimate amount={total} asset={asset.symbol} />
           </p>
         </fieldset>

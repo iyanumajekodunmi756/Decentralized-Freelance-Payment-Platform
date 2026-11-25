@@ -32,6 +32,7 @@ import {
   type MilestoneReleaseStores,
   type RatedStores,
 } from "../indexer";
+import { MockSorobanRpcServer } from "../test/mockRpc";
 
 /** Build an ScMap the way `#[contractevent]` data is encoded. */
 function mapVal(entries: Record<string, xdr.ScVal>): xdr.ScVal {
@@ -307,17 +308,19 @@ describe("processContractEvents", () => {
     // One event stream per contract, as the RPC would return from a single
     // batch response once all three ids are in the same filter.
     const events = [
-      makeEvent("funded", { escrow_id: nativeToScVal(7n, { type: "u64" }) }, 10),
-      makeEvent("rated", { escrow_id: nativeToScVal(7n, { type: "u64" }) }, 11),
-      makeTopicEvent("raised", 7n, { dispute_id: nativeToScVal(0n, { type: "u64" }) }, 12),
+      { ...makeEvent("funded", { escrow_id: nativeToScVal(7n, { type: "u64" }) }, 10), contractId: escrow, type: "contract" },
+      { ...makeEvent("rated", { escrow_id: nativeToScVal(7n, { type: "u64" }) }, 11), contractId: reputation, type: "contract" },
+      { ...makeTopicEvent("raised", 7n, { dispute_id: nativeToScVal(0n, { type: "u64" }) }, 12), contractId: dispute, type: "contract" },
     ];
+    const mockRpc = new MockSorobanRpcServer("https://mock-rpc.local", 12);
+    mockRpc.enqueueEvents(events as any);
     const source = {
-      getEvents: vi.fn(async () => ({ events, latestLedger: 12 })),
+      getEvents: vi.fn((req) => mockRpc.getEvents(req)),
     };
     const cursor = { get: async () => 9, set: vi.fn(async () => undefined) };
     const dispatch = vi.fn(async (_event: ContractEventLike) => undefined);
 
-    const next = await processContractEvents(source, cursor, [escrow, dispute, reputation], dispatch);
+    const next = await processContractEvents(source as any, cursor, [escrow, dispute, reputation], dispatch);
 
     // One HTTP request for all three contracts, one filter holding all ids.
     expect(source.getEvents).toHaveBeenCalledTimes(1);

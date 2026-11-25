@@ -239,6 +239,75 @@ describe("PostJob total", () => {
   });
 });
 
+describe("PostJob fiat estimates (#363)", () => {
+  /** Render with a price feed that knows XLM but not the other assets. */
+  async function renderWithRates(env: Record<string, string>): Promise<void> {
+    vi.resetModules();
+    vi.doMock("../lib/prices", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../lib/prices")>()),
+      getFiatRates: async () => ({ XLM: 0.5 }),
+    }));
+    vi.stubEnv("VITE_USDC_CONTRACT_ID", "");
+    vi.stubEnv("VITE_XLM_CONTRACT_ID", "");
+    for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
+    PostJob = (await import("./PostJob")).default;
+    render(<PostJob />);
+  }
+
+  afterEach(() => {
+    vi.doUnmock("../lib/prices");
+  });
+
+  it("shows an estimated fiat value under each milestone amount", async () => {
+    await renderWithRates({ VITE_XLM_CONTRACT_ID: "CXLM" });
+
+    fireEvent.change(screen.getByLabelText(/Amount #1/), { target: { value: "10" } });
+
+    await waitFor(() => {
+      expect(screen.getAllByText((_, el) => el?.textContent?.includes("5.00") ?? false).length).toBeGreaterThan(0);
+    });
+  });
+
+  it("shows the total budget in token units and estimated USD, updating live", async () => {
+    await renderWithRates({ VITE_XLM_CONTRACT_ID: "CXLM" });
+
+    fireEvent.change(screen.getByLabelText(/Amount #1/), { target: { value: "10" } });
+
+    await waitFor(() => {
+      const total = screen.getByText(/^Total:/).textContent ?? "";
+      expect(total).toContain("10");
+      expect(total).toContain("XLM");
+      expect(total).toContain("$5.00");
+    });
+
+    // Adding a milestone updates the total live.
+    fireEvent.click(screen.getByRole("button", { name: "Add milestone" }));
+    fireEvent.change(screen.getByLabelText(/Amount #2/), { target: { value: "10" } });
+
+    await waitFor(() => {
+      const total = screen.getByText(/^Total:/).textContent ?? "";
+      expect(total).toContain("20");
+      expect(total).toContain("$10.00");
+    });
+  });
+
+  it("hides the estimate for an asset with no rate without breaking the form", async () => {
+    // USDC is configured but the mocked feed has no USDC rate.
+    await renderWithRates({ VITE_USDC_CONTRACT_ID: "CUSDC" });
+
+    fireEvent.change(screen.getByLabelText(/Amount #1/), { target: { value: "10" } });
+
+    await waitFor(() => {
+      expect(screen.getByText(/^Total:/).textContent).toContain("10");
+    });
+    expect(screen.queryByText(/≈\s*\$/)).toBeNull();
+    // The form still submits normally.
+    expect(
+      (screen.getByRole("button", { name: /Create & Fund Escrow/ }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+});
+
 
 describe("PostJob milestone deadline validation (Issue #255)", () => {
   it("renders a deadline input for each milestone row", async () => {

@@ -1,3 +1,4 @@
+import { requireJsonContentType } from "../middleware/contentType";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { AppError, DatabaseTimeoutError, errorHandler } from "../middleware/errorHandler";
 import type { NextFunction, Request, Response } from "express";
@@ -171,5 +172,33 @@ describe("errorHandler", () => {
         details: [{ field: "budget", issue: "Expected positive number" }],
       },
     });
+  });
+});
+
+describe("JSON API content type", () => {
+  it.each([
+    ["POST", "multipart/form-data", "12", 415],
+    ["PUT", "text/plain", "12", 415],
+    ["PATCH", undefined, "12", 415],
+    ["POST", "application/json", "12", undefined],
+    ["POST", undefined, "0", undefined],
+    ["DELETE", "text/plain", "12", undefined],
+    ["GET", undefined, "12", undefined],
+  ])("checks %s with %s and length %s", (method, type, length, status) => {
+    const request = {
+      method,
+      headers: { "content-length": length },
+      is: vi.fn(() => type === "application/json"),
+    } as unknown as Request;
+    const next = vi.fn();
+    requireJsonContentType(request, {} as Response, next);
+    if (status) {
+      expect(next).toHaveBeenCalledWith(expect.objectContaining({
+        statusCode: status,
+        code: "UNSUPPORTED_MEDIA_TYPE",
+      }));
+    } else {
+      expect(next).toHaveBeenCalledWith();
+    }
   });
 });

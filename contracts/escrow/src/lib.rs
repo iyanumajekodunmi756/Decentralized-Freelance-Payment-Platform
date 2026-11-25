@@ -6,6 +6,7 @@
 //! # State Machine
 //!
 //!   Created → Active → Completed
+//!         ↘ Cancelled (via cancel, before funding)
 //!                  ↘ Disputed → Completed (via dispute contract)
 //!                  ↘ Refunded (via reclaim_expired)
 //!
@@ -44,6 +45,14 @@ const TTL_THRESHOLD: u32 = 30 * DAY_IN_LEDGERS;
 const TTL_EXTEND_TO: u32 = 90 * DAY_IN_LEDGERS;
 /// Default seconds after a dispute is opened before the client can reclaim.
 const DEFAULT_DISPUTE_TIMEOUT_SECONDS: u64 = 7 * 24 * 60 * 60;
+/// Longest accepted escrow lifetime, measured from creation: 365 days.
+///
+/// `reclaim_expired` is the client's only way back to the funds without a
+/// dispute, and it only works once `expiry` has passed. An unbounded `expiry`
+/// (a unit-confused millisecond value, or `u64::MAX`) would therefore lock
+/// deposited funds until a dispute is raised, so `create` caps the distance
+/// between the current ledger time and the requested deadline.
+pub const MAX_ESCROW_DURATION_SECONDS: u64 = 365 * 24 * 60 * 60;
 /// Maximum number of milestones per escrow. Keeps every loop within the
 /// Soroban CPU budget and prevents `resolve`/`remaining` from being blocked
 /// by an unbounded list. Must match the cap enforced by the frontend.
@@ -141,6 +150,16 @@ pub struct Refunded {
     pub escrow_id: u64,
     pub client: Address,
     pub amount: i128,
+}
+
+/// An unfunded `Created` escrow was closed by its client. Terminal state, and
+/// the signal for indexers to stop mirroring a job that will never be funded.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Cancelled {
+    #[topic]
+    pub escrow_id: u64,
+    pub client: Address,
 }
 
 #[contractevent]
@@ -415,7 +434,9 @@ impl EscrowContract {
     /// - `freelancer` – party delivering the work
     /// - `token`      – SAC-compatible token address (e.g. USDC)
     /// - `milestones` – ordered list of milestones; each amount must be > 0
-    /// - `expiry`     – unix timestamp safety deadline, must be in the future
+    /// - `expiry`     – unix timestamp safety deadline, must be in the future and
+    ///   no more than [`MAX_ESCROW_DURATION_SECONDS`] (365 days) ahead. Both
+    ///   bounds fail with `InvalidExpiry`.
     ///
     /// Returns the new escrow ID.
     pub fn create(
@@ -438,7 +459,16 @@ impl EscrowContract {
         if client == freelancer {
             return Err(EscrowError::InvalidCounterparty);
         }
-        if expiry <= env.ledger().timestamp() {
+        let now = env.ledger().timestamp();
+        if expiry <= now {
+            return Err(EscrowError::InvalidExpiry);
+        }
+        // Upper bound: a deadline far enough out that `reclaim_expired` can
+        // never realistically run would defeat the expiry safety net.
+        let max_expiry = now
+            .checked_add(MAX_ESCROW_DURATION_SECONDS)
+            .ok_or(EscrowError::Overflow)?;
+        if expiry > max_expiry {
             return Err(EscrowError::InvalidExpiry);
         }
 
@@ -524,6 +554,40 @@ impl EscrowContract {
             escrow_id,
             count,
             total_amount,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Close an unfunded escrow before any money moves.
+    ///
+    /// Client-only, and only while the escrow is still `Created`. Funded
+    /// (`Active`), `Disputed`, `Completed`, `Refunded` and already `Cancelled`
+    /// escrows are rejected with [`EscrowError::InvalidStatus`], so this can
+    /// never strand or move funds.
+    ///
+    /// The entry is kept with `status = Cancelled` rather than deleted, so the
+    /// escrow id stays resolvable through `get` and off-chain mirrors can
+    /// reconcile the closing event against the row they already created. An
+    /// expired-but-unfunded escrow can still be cancelled: `fund` refuses it
+    /// (`InvalidExpiry`), so cancelling is the only way to close it cleanly.
+    pub fn cancel(env: Env, escrow_id: u64) -> Result<(), EscrowError> {
+        Self::require_not_paused(&env)?;
+        let mut escrow = Self::load(&env, escrow_id)?;
+        escrow.client.require_auth();
+
+        if escrow.status != EscrowStatus::Created {
+            return Err(EscrowError::InvalidStatus);
+        }
+
+        // Effects only: a `Created` escrow holds no funds, so there is no
+        // interaction to follow.
+        escrow.status = EscrowStatus::Cancelled;
+        Self::save(&env, escrow_id, &escrow);
+
+        Cancelled {
+            escrow_id,
+            client: escrow.client.clone(),
         }
         .publish(&env);
         Ok(())
@@ -748,11 +812,8 @@ impl EscrowContract {
             return Err(EscrowError::InvalidStatus);
         }
 
-        let deadline: u64 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::DisputeDeadline(escrow_id))
-            .ok_or(EscrowError::NotInitialized)?;
+        let deadline =
+            Self::load_dispute_deadline(&env, escrow_id).ok_or(EscrowError::NotInitialized)?;
         if env.ledger().timestamp() <= deadline {
             return Err(EscrowError::DisputeTimeoutNotReached);
         }
@@ -806,17 +867,7 @@ impl EscrowContract {
         if escrow.status != EscrowStatus::Disputed {
             return Err(EscrowError::InvalidStatus);
         }
-        if client_share < 0 || freelancer_share < 0 {
-            return Err(EscrowError::InvalidShares);
-        }
-
-        let remaining = Self::remaining(&escrow)?;
-        let total_share = client_share
-            .checked_add(freelancer_share)
-            .ok_or(EscrowError::Overflow)?;
-        if total_share != remaining {
-            return Err(EscrowError::InvalidShares);
-        }
+        validate_resolution_split(Self::remaining(&escrow)?, client_share, freelancer_share)?;
 
         // Effects before interaction: mark every milestone fully released and complete.
         for i in 0..escrow.milestones.len() {
@@ -894,11 +945,13 @@ impl EscrowContract {
     }
 
     /// Read the dispute timelock deadline for an escrow (view).
+    ///
+    /// Refreshes the entry's TTL as it reads it: the deadline is written only
+    /// once, in `open_dispute`, so a dispute that stays open while it is only
+    /// queried would let the entry archive and strand the client's timelock
+    /// escape hatch (`reclaim_after_dispute_timeout`).
     pub fn dispute_deadline(env: Env, escrow_id: u64) -> Result<u64, EscrowError> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::DisputeDeadline(escrow_id))
-            .ok_or(EscrowError::NotFound)
+        Self::load_dispute_deadline(&env, escrow_id).ok_or(EscrowError::NotFound)
     }
 
     /// Read the configured dispute contract (view).
@@ -973,6 +1026,21 @@ impl EscrowContract {
         Ok(total)
     }
 
+    /// Read `DataKey::DisputeDeadline(id)`, refreshing its TTL when present.
+    ///
+    /// `extend_ttl` is skipped for missing entries instead of being called
+    /// blindly, so callers may read before a dispute is ever opened.
+    fn load_dispute_deadline(env: &Env, id: u64) -> Option<u64> {
+        let key = DataKey::DisputeDeadline(id);
+        let deadline: Option<u64> = env.storage().persistent().get(&key);
+        if deadline.is_some() {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        }
+        deadline
+    }
+
     fn load(env: &Env, id: u64) -> Result<EscrowData, EscrowError> {
         let escrow: EscrowData = env
             .storage()
@@ -1027,3 +1095,21 @@ impl EscrowContract {
 
 #[cfg(test)]
 mod test;
+
+/// Validate the two payout amounts against the remaining escrow balance.
+pub fn validate_resolution_split(
+    remaining: i128,
+    client_share: i128,
+    freelancer_share: i128,
+) -> Result<(), EscrowError> {
+    if client_share < 0 || freelancer_share < 0 {
+        return Err(EscrowError::InvalidShares);
+    }
+    let total_share = client_share
+        .checked_add(freelancer_share)
+        .ok_or(EscrowError::Overflow)?;
+    if total_share != remaining {
+        return Err(EscrowError::InvalidShares);
+    }
+    Ok(())
+}

@@ -35,12 +35,12 @@ type HeadersConfig = NonNullable<ResponseConfig["headers"]>;
 
 import { config } from "./config";
 import {
-  createDeliverableSchema,
+  deliverableUploadSchema,
   createJobSchema,
   createProposalSchema,
   transactionHistoryQuerySchema,
 } from "./lib/schemas";
-import { authSchema, updateSchema } from "./routes/users";
+import { authSchema, challengeSchema, updateSchema } from "./routes/users";
 import {
   buildCreateSchema,
   recordMilestonesSchema,
@@ -356,8 +356,22 @@ registry.registerPath({
   tags: ["Users"],
   summary: "Issue a single-use nonce for SEP-53 signing",
   description:
-    "Issues a cryptographic challenge nonce. Rate limited per IP (AUTH_RATE_LIMIT_MAX / AUTH_RATE_LIMIT_WINDOW_MS). Clients must observe RateLimit-* response headers and back off when receiving HTTP 429.",
+    "GET and POST share a limit of up to 10 challenges per minute per IP. Clients must back off when receiving HTTP 429.",
   request: { query: z.object({ address: z.string().describe("Stellar account (G…)") }) },
+  responses: {
+    200: json(z.object({ nonce: z.string() }), "The nonce, valid for 60 seconds", rateLimitHeaders),
+    400: errors[400],
+    429: errors[429],
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/users/challenge",
+  tags: ["Users"],
+  summary: "Issue a single-use nonce for SEP-53 signing",
+  description: "Shares the GET challenge endpoint's per-IP rate limit.",
+  request: { body: { content: { "application/json": { schema: challengeSchema } } } },
   responses: {
     200: json(z.object({ nonce: z.string() }), "The nonce, valid for 60 seconds", rateLimitHeaders),
     400: errors[400],
@@ -735,10 +749,11 @@ registry.registerPath({
   path: "/api/jobs/{jobId}/milestones/{index}/deliverables",
   tags: ["Jobs"],
   summary: "Attach a deliverable to a milestone (assigned freelancer only)",
+  description: "Submit a base64 data URL for a PDF, PNG, JPEG or ZIP file up to 5 MiB.",
   security: auth,
   request: {
     params: z.object({ jobId: z.string(), index: z.coerce.number().int() }),
-    body: { content: { "application/json": { schema: createDeliverableSchema } } },
+    body: { content: { "application/json": { schema: deliverableUploadSchema } } },
   },
   responses: { 201: json(z.object({ id: z.string() }), "The deliverable"), 400: errors[400] },
 });
@@ -1221,6 +1236,24 @@ registry.registerPath({
       "Unread counts, total and per job",
     ),
     401: errors[401],
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/messages/{jobId}/stream",
+  tags: ["Messages"],
+  summary: "Stream real-time messages via Server-Sent Events (participants only)",
+  security: auth,
+  request: {
+    params: z.object({ jobId: z.string() }),
+    query: z.object({ token: z.string().optional() }),
+  },
+  responses: {
+    200: { description: "Text event stream of chat messages" },
+    401: errors[401],
+    403: errors[403],
+    404: errors[404],
   },
 });
 

@@ -26,6 +26,166 @@ export function getPoolStats(): PoolMonitoringStats {
   return { ...poolStats };
 }
 
+export const DEFAULT_REPLICA_LAG_THRESHOLD_MS = 30_000;
+export const REPLICA_HEALTH_TIMEOUT_MS = 3_000;
+
+/** Minimal surface of a Prisma client used to probe a read replica. */
+export interface ReplicaQueryClient {
+  $queryRawUnsafe<T = unknown>(query: string): Promise<T>;
+}
+
+export interface ReplicationHealth {
+  /** Whether REPLICA_URL is configured at all. */
+  configured: boolean;
+  /** Whether the replica answered the probe query. */
+  connected: boolean;
+  /** Whether the replica reports itself as a standby (pg_is_in_recovery()). */
+  inRecovery: boolean | null;
+  /** Replication lag in milliseconds, or null when it cannot be determined. */
+  lagMs: number | null;
+  lagSeconds: number | null;
+  thresholdMs: number;
+  thresholdSeconds: number;
+  /** True when connected but lag exceeds the configured threshold. */
+  degraded: boolean;
+  error?: string;
+}
+
+export interface ReplicationHealthOptions {
+  replicaUrl?: string;
+  thresholdMs?: number;
+  /** Injection point for tests; defaults to a lazily created Prisma client. */
+  client?: ReplicaQueryClient;
+  timeoutMs?: number;
+}
+
+/**
+ * Time-based lag probe for a PostgreSQL streaming replica (issue #381).
+ *
+ * `pg_last_xact_replay_timestamp()` is the commit timestamp of the last
+ * transaction replayed on the standby, so `NOW() - replay_timestamp` is how far
+ * behind the primary the replica is. Both values are read from the replica, so
+ * the result does not depend on clock skew between hosts. Byte lag would need
+ * the primary's LSN, which a standby cannot read on its own.
+ */
+export const REPLICA_LAG_QUERY = `
+  SELECT
+    pg_is_in_recovery() AS in_recovery,
+    pg_last_xact_replay_timestamp() AS replay_timestamp,
+    NOW() AS now
+`;
+
+interface ReplicaLagRow {
+  in_recovery: boolean;
+  replay_timestamp: Date | string | null;
+  now: Date | string;
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+const globalForReplica = globalThis as unknown as { replicaPrisma?: PrismaClient };
+
+function getReplicaClient(replicaUrl: string): PrismaClient {
+  const url = formatDatabaseUrl(replicaUrl) ?? replicaUrl;
+  if (!globalForReplica.replicaPrisma) {
+    globalForReplica.replicaPrisma = new PrismaClient({
+      datasources: { db: { url } },
+      log: ["error"],
+    });
+  }
+  return globalForReplica.replicaPrisma;
+}
+
+/** Disconnect the lazily created replica client (used on shutdown and in tests). */
+export async function closeReplicaClient(): Promise<void> {
+  const client = globalForReplica.replicaPrisma;
+  if (!client) return;
+  globalForReplica.replicaPrisma = undefined;
+  await client.$disconnect();
+}
+
+/**
+ * Probe the configured read replica and report its replication lag.
+ * Never throws: a failed probe is reported as `connected: false` so /health can
+ * degrade instead of erroring.
+ */
+export async function checkReplicationHealth(
+  options: ReplicationHealthOptions = {},
+): Promise<ReplicationHealth> {
+  const replicaUrl = options.replicaUrl ?? process.env.REPLICA_URL;
+  const thresholdMs =
+    options.thresholdMs ??
+    (process.env.REPLICA_LAG_THRESHOLD_MS
+      ? parseInt(process.env.REPLICA_LAG_THRESHOLD_MS, 10)
+      : DEFAULT_REPLICA_LAG_THRESHOLD_MS);
+
+  const base = {
+    configured: Boolean(replicaUrl),
+    thresholdMs,
+    thresholdSeconds: thresholdMs / 1000,
+  };
+
+  if (!replicaUrl) {
+    return {
+      ...base,
+      connected: false,
+      inRecovery: null,
+      lagMs: null,
+      lagSeconds: null,
+      degraded: false,
+    };
+  }
+
+  try {
+    const client = options.client ?? getReplicaClient(replicaUrl);
+    const rows = await withTimeout(
+      client.$queryRawUnsafe<ReplicaLagRow[]>(REPLICA_LAG_QUERY),
+      options.timeoutMs ?? REPLICA_HEALTH_TIMEOUT_MS,
+      "Read replica health check timed out",
+    );
+
+    const row = rows[0];
+    if (!row) throw new Error("Read replica health check returned no rows");
+
+    const inRecovery = Boolean(row.in_recovery);
+    // A primary (or a replica that has not replayed anything yet) has no replay
+    // timestamp. Treat a primary as zero lag and an unstarted standby as unknown
+    // rather than reporting a large false-positive lag.
+    const lagMs = inRecovery
+      ? row.replay_timestamp
+        ? Math.max(0, new Date(row.now).getTime() - new Date(row.replay_timestamp).getTime())
+        : null
+      : 0;
+
+    return {
+      ...base,
+      connected: true,
+      inRecovery,
+      lagMs,
+      lagSeconds: lagMs === null ? null : lagMs / 1000,
+      degraded: lagMs !== null && lagMs > thresholdMs,
+    };
+  } catch (error) {
+    return {
+      ...base,
+      connected: false,
+      inRecovery: null,
+      lagMs: null,
+      lagSeconds: null,
+      degraded: true,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 export function resetPoolStats(): void {
   poolStats.activeQueries = 0;
   poolStats.totalQueries = 0;

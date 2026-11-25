@@ -41,9 +41,10 @@ import JobDetailSkeleton from "../components/JobDetailSkeleton";
 import Conversation from "../components/Conversation";
 import DisputeEvidence from "../components/DisputeEvidence";
 import ConfirmModal from "../components/ConfirmModal";
-import { useEscrow, type EscrowView } from "../hooks/useEscrow";
+import { useEscrow, type EscrowView, type DisputeContractData } from "../hooks/useEscrow";
 import { useWallet } from "../hooks/wallet-context";
 import { explorerContractUrl, explorerTxUrl } from "../lib/stellar";
+import { shortAddress } from "../lib/address";
 import { assetForContractId, formatAmount, fromBaseUnits, toBaseUnits } from "../lib/assets";
 import {
   asReadError,
@@ -97,10 +98,14 @@ export default function JobDetail() {
     releaseMilestone,
     releasePartial,
     openDispute,
+    approveDisputeSplit,
     reclaimDisputed,
     reclaimExpired,
     submitRating,
     getDisputeDeadline,
+    getArbitrators,
+    getDisputeThreshold,
+    getDisputeRecord,
     isPending,
     hasPendingWrite,
     error,
@@ -120,6 +125,11 @@ export default function JobDetail() {
   // Dispute timelock: the deadline read from the contract (unix seconds) plus a
   // 1s clock so the remaining time ticks without re-reading the chain each tick.
   const [disputeDeadline, setDisputeDeadline] = useState<bigint | null>(null);
+  const [panelArbitrators, setPanelArbitrators] = useState<string[]>([]);
+  const [disputeThreshold, setDisputeThreshold] = useState<number>(1);
+  const [disputeRecord, setDisputeRecord] = useState<DisputeContractData | null>(null);
+  const [splitClientPercent, setSplitClientPercent] = useState<number>(50);
+  const [splitSuccessNote, setSplitSuccessNote] = useState<string | null>(null);
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
 
   const [score, setScore] = useState(0);
@@ -192,6 +202,16 @@ export default function JobDetail() {
           // Leave the last known deadline: a failed deadline read must not
           // replace the escrow the visitor is looking at.
         }
+        try {
+          const [panel, thresh] = await Promise.all([
+            getArbitrators(),
+            getDisputeThreshold(),
+          ]);
+          setPanelArbitrators(panel || []);
+          setDisputeThreshold(thresh || 1);
+        } catch {
+          // fallback
+        }
       } else {
         setDisputeDeadline(null);
       }
@@ -200,11 +220,12 @@ export default function JobDetail() {
       // first load, not on every 5s poll; the job ID mapping is immutable).
       if (!cachedJobId) {
         try {
-          const jId = await findJobIdByEscrow(escrowId);
-          if (jId) {
-            setCachedJobId(jId);
-            setOffChainJobId(jId);
-            void loadJobDeliverables(jId);
+          const job = await fetchJobByEscrow(escrowId);
+          if (job?.id) {
+            setCachedJobId(job.id);
+            setOffChainJobId(job.id);
+            setOffChainJob(job);
+            void loadJobDeliverables(job.id);
           }
         } catch {
           // ignore
@@ -214,7 +235,16 @@ export default function JobDetail() {
       // Keep the last good view: one failed poll must not blank the page.
       setReadFailure(asReadError(e));
     }
-  }, [escrowId, getEscrow, getDisputeDeadline, hasPendingWrite, loadJobDeliverables, cachedJobId]);
+  }, [
+    escrowId,
+    getEscrow,
+    getDisputeDeadline,
+    getArbitrators,
+    getDisputeThreshold,
+    hasPendingWrite,
+    loadJobDeliverables,
+    cachedJobId,
+  ]);
 
   useEffect(() => {
     void refresh();
@@ -263,6 +293,19 @@ export default function JobDetail() {
     const timer = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1_000);
     return () => clearInterval(timer);
   }, [escrow?.status]);
+
+  useEffect(() => {
+    if (escrow?.status !== "Disputed") return;
+    const onChainDisputeId = offChainJob?.disputes?.[0]?.onChainId;
+    const disputeIdToQuery = onChainDisputeId ? BigInt(onChainDisputeId) : (escrowId !== null ? escrowId : null);
+    if (disputeIdToQuery !== null) {
+      void getDisputeRecord(disputeIdToQuery)
+        .then((rec) => {
+          if (rec) setDisputeRecord(rec);
+        })
+        .catch(() => {});
+    }
+  }, [offChainJob, escrowId, escrow?.status, getDisputeRecord]);
 
   // The 5s poll resets `lastFailure` on every read, so latch the rejection
   // instead of reading the hook's state directly.
@@ -379,6 +422,31 @@ export default function JobDetail() {
     setLastHash(res.hash);
     await saveDispute(escrowId, text, res.disputeId);
     void refresh();
+  }
+
+  async function handleApproveSplit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!publicKey) return;
+    const onChainDisputeId = offChainJob?.disputes?.[0]?.onChainId
+      ? BigInt(offChainJob.disputes[0].onChainId)
+      : null;
+    const disputeIdToUse = onChainDisputeId ?? escrowId;
+    if (disputeIdToUse === null) return;
+
+    const clientShareStroops = (unreleasedAmount * BigInt(splitClientPercent)) / 100n;
+    const freelancerShareStroops = unreleasedAmount - clientShareStroops;
+
+    const res = await approveDisputeSplit(disputeIdToUse, clientShareStroops, freelancerShareStroops);
+    if (res) {
+      setLastHash(res.hash);
+      setSplitSuccessNote(`Split approved: ${splitClientPercent}% client / ${100 - splitClientPercent}% freelancer.`);
+      try {
+        const rec = await getDisputeRecord(disputeIdToUse);
+        setDisputeRecord(rec);
+      } catch {
+        // ignore
+      }
+    }
   }
 
   async function handleUploadDeliverable(e: React.FormEvent, milestoneIndex: number) {
@@ -785,6 +853,7 @@ export default function JobDetail() {
                             <br />
                             <input
                               type="file"
+                              accept=".pdf,.png,.jpg,.jpeg,.zip"
                               onChange={(e) => setSelectedFile(e.target.files?.[0] || null)}
                               required
                             />
@@ -903,6 +972,103 @@ export default function JobDetail() {
                     : "Reclaim after timeout"}
                 </button>
               )}
+
+              {/* Multi-arbitrator voting progress and approval status (issue #257) */}
+              <div className="dispute-panel" data-testid="dispute-panel">
+                <h4>Multi-Arbitrator Panel & Voting Progress</h4>
+                <div className="dispute-voting-progress">
+                  <p>
+                    <strong>Approval Progress:</strong>{" "}
+                    <span className="badge badge-active">
+                      {disputeRecord?.status === "Resolved" || (disputeRecord?.status === "UnderReview" && disputeThreshold === 1)
+                        ? `${disputeThreshold} of ${disputeThreshold} approvals`
+                        : `${disputeRecord?.status === "UnderReview" ? 1 : 0} of ${disputeThreshold} approvals required`}
+                    </span>{" "}
+                    ({disputeThreshold} of {panelArbitrators.length > 0 ? panelArbitrators.length : 1} panel members required)
+                  </p>
+                  <progress
+                    value={
+                      disputeRecord?.status === "Resolved" || (disputeRecord?.status === "UnderReview" && disputeThreshold === 1)
+                        ? disputeThreshold
+                        : disputeRecord?.status === "UnderReview"
+                        ? 1
+                        : 0
+                    }
+                    max={disputeThreshold}
+                    style={{ width: "100%", height: "8px" }}
+                  />
+                </div>
+
+                {disputeRecord?.status === "Resolved" && (
+                  <p className="alert alert-success" role="status">
+                    Resolution threshold reached ({disputeThreshold} of {disputeThreshold} approvals). Dispute resolution confirmed.
+                  </p>
+                )}
+
+                {panelArbitrators.length > 0 && (
+                  <div className="arbitrator-list">
+                    <h5>Panel Arbitrators ({panelArbitrators.length})</h5>
+                    <ul>
+                      {panelArbitrators.map((arb) => {
+                        const isMe = arb === publicKey;
+                        return (
+                          <li key={arb}>
+                            <code>{shortAddress(arb)}</code>
+                            {isMe && <span className="badge badge-active">You (Arbitrator)</span>}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                )}
+
+                <div className="dispute-split-status">
+                  <h5>Active Proposed Split</h5>
+                  <p>
+                    Client Share:{" "}
+                    <strong>
+                      {formatAmount((unreleasedAmount * BigInt(splitClientPercent)) / 100n, decimals)} {symbol} ({splitClientPercent}%)
+                    </strong>
+                    {" · "}
+                    Freelancer Share:{" "}
+                    <strong>
+                      {formatAmount(unreleasedAmount - (unreleasedAmount * BigInt(splitClientPercent)) / 100n, decimals)} {symbol} ({100 - splitClientPercent}%)
+                    </strong>
+                  </p>
+                </div>
+
+                {splitSuccessNote && (
+                  <p className="alert alert-success" role="status">
+                    {splitSuccessNote}
+                  </p>
+                )}
+
+                {publicKey && panelArbitrators.includes(publicKey) && disputeRecord?.status !== "Resolved" && (
+                  <form onSubmit={handleApproveSplit} className="dispute-vote-form">
+                    <h5>Cast Arbitrator Vote</h5>
+                    <label>
+                      Client Share (%):
+                      <input
+                        type="number"
+                        min="0"
+                        max="100"
+                        value={splitClientPercent}
+                        onChange={(e) => setSplitClientPercent(Math.max(0, Math.min(100, Number(e.target.value))))}
+                      />
+                    </label>
+                    <p className="muted">Freelancer receives remainder: {100 - splitClientPercent}%</p>
+                    <button
+                      type="submit"
+                      disabled={isPending("dispute", `${offChainJob?.disputes?.[0]?.onChainId ?? escrowId}`)}
+                      aria-busy={isPending("dispute", `${offChainJob?.disputes?.[0]?.onChainId ?? escrowId}`)}
+                    >
+                      {isPending("dispute", `${offChainJob?.disputes?.[0]?.onChainId ?? escrowId}`)
+                        ? "Approving Split…"
+                        : "Approve Split"}
+                    </button>
+                  </form>
+                )}
+              </div>
 
               {/* Notes and attachments the parties submitted (#78). The
                   off-chain dispute row is the id the evidence API scopes to;

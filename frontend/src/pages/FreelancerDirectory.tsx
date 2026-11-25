@@ -15,6 +15,11 @@ import { useDebounce } from "../hooks/useDebounce";
 
 const PAGE_SIZE = 10;
 
+type SortOrder = "asc" | "desc";
+const sortFields = { rep: "reputation", jobs: "jobs", recent: "recent" } as const;
+type SortKey = keyof typeof sortFields;
+type SortOption = `${SortKey}_${SortOrder}`;
+
 export default function FreelancerDirectory() {
   const [freelancers, setFreelancers] = useState<FreelancerApi[]>([]);
   const [loading, setLoading] = useState(false);
@@ -23,7 +28,7 @@ export default function FreelancerDirectory() {
   const [searchInput, setSearchInput] = useState("");
   const debouncedSearch = useDebounce(searchInput, 300);
   const [activeSearch, setActiveSearch] = useState("");
-  const [sortOption, setSortOption] = useState<"rep_desc" | "rep_asc" | "jobs_desc" | "recent_desc">(
+  const [sortOption, setSortOption] = useState<SortOption>(
     "rep_desc",
   );
   const [page, setPage] = useState(1);
@@ -35,19 +40,8 @@ export default function FreelancerDirectory() {
       setLoading(true);
       setError(null);
 
-      let sortBy: "reputation" | "jobs" | "recent" = "reputation";
-      let sortOrder: "asc" | "desc" = "desc";
-
-      if (sortOption === "rep_asc") {
-        sortBy = "reputation";
-        sortOrder = "asc";
-      } else if (sortOption === "jobs_desc") {
-        sortBy = "jobs";
-        sortOrder = "desc";
-      } else if (sortOption === "recent_desc") {
-        sortBy = "recent";
-        sortOrder = "desc";
-      }
+      const [key, sortOrder] = sortOption.split("_") as [SortKey, SortOrder];
+      const sortBy = sortFields[key];
 
       try {
         const data = await fetchFreelancers(
@@ -61,6 +55,7 @@ export default function FreelancerDirectory() {
           signal,
         );
 
+        if (signal?.aborted) return;
         setFreelancers((prev) => (append ? [...prev, ...data.freelancers] : data.freelancers));
         setTotal(data.total);
         setHasMore(data.freelancers.length === PAGE_SIZE && pageToLoad < data.totalPages);
@@ -69,7 +64,7 @@ export default function FreelancerDirectory() {
         if (err instanceof DOMException && err.name === "AbortError") return;
         setError(err instanceof Error ? err.message : String(err));
       } finally {
-        setLoading(false);
+        if (!signal?.aborted) setLoading(false);
       }
     },
     [activeSearch, sortOption],
@@ -155,14 +150,16 @@ export default function FreelancerDirectory() {
             value={sortOption}
             onChange={(e) =>
               setSortOption(
-                e.target.value as "rep_desc" | "rep_asc" | "jobs_desc" | "recent_desc",
+                e.target.value as SortOption,
               )
             }
           >
             <option value="rep_desc">Reputation: Highest first</option>
             <option value="rep_asc">Reputation: Lowest first</option>
             <option value="jobs_desc">Most Completed Jobs</option>
+            <option value="jobs_asc">Fewest Completed Jobs</option>
             <option value="recent_desc">Recently Joined</option>
+            <option value="recent_asc">Earliest Joined</option>
           </select>
         </div>
       </div>
@@ -191,97 +188,47 @@ export default function FreelancerDirectory() {
             Showing {freelancers.length} of {total} {total === 1 ? "freelancer" : "freelancers"}
           </p>
 
-          <ul
-            className="job-list"
-            style={{ display: "flex", flexDirection: "column", gap: "1rem" }}
-          >
-            {freelancers.map((freelancer) => (
-              <li
-                key={freelancer.id}
-                className="card"
-                style={{
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: "0.5rem",
-                  padding: "1.2rem",
-                }}
-              >
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "flex-start",
-                    flexWrap: "wrap",
-                    gap: "0.5rem",
-                  }}
-                >
-                  <div>
-                    <h2 style={{ fontSize: "1.2rem", margin: 0, fontWeight: 600 }}>
-                      {freelancer.displayName || "Anonymous Freelancer"}
-                    </h2>
-                    <div style={{ marginTop: "0.25rem" }}>
-                      <AddressField address={freelancer.stellarAddress} truncate qr />
-                    </div>
-                  </div>
-
-                  <div style={{ textAlign: "right" }}>
-                    <div
-                      style={{
-                        fontSize: "1.1rem",
-                        fontWeight: 700,
-                        color: freelancer.totalRatings > 0 ? "#b45309" : "var(--muted)",
-                      }}
-                    >
-                      {freelancer.totalRatings > 0 ? (
-                        <>★ {freelancer.averageScore.toFixed(2)} / 5</>
-                      ) : (
-                        <span style={{ fontSize: "0.9rem", fontWeight: 400 }}>No ratings yet</span>
-                      )}
-                    </div>
-                    <div className="muted" style={{ fontSize: "0.8rem" }}>
-                      {freelancer.totalRatings > 0 && (
-                        <span>
-                          {freelancer.totalRatings}{" "}
-                          {freelancer.totalRatings === 1 ? "rating" : "ratings"} ·{" "}
-                        </span>
-                      )}
-                      <span>
-                        {freelancer.completedJobsCount}{" "}
-                        {freelancer.completedJobsCount === 1 ? "job completed" : "jobs completed"}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                {freelancer.bio && (
-                  <p style={{ margin: "0.5rem 0", color: "var(--text)" }}>{freelancer.bio}</p>
-                )}
-
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "flex-end",
-                    marginTop: "0.5rem",
-                    borderTop: "1px solid var(--border)",
-                    paddingTop: "0.5rem",
-                  }}
-                >
-                  <Link
-                    to={`/profile/${freelancer.stellarAddress}`}
-                    className="btn-primary"
-                    style={{
-                      textDecoration: "none",
-                      padding: "0.35rem 0.75rem",
-                      fontSize: "0.9rem",
-                      borderRadius: "var(--radius)",
-                    }}
-                  >
-                    View Profile →
-                  </Link>
-                </div>
-              </li>
-            ))}
-          </ul>
+          <table className="freelancer-directory-table" aria-label="Freelancers">
+            <thead>
+              <tr>
+                <th scope="col">Freelancer</th>
+                {([["rep", "Reputation"], ["jobs", "Completed projects"], ["recent", "Joined"]] as const).map(([key, label]) => {
+                  const selected = sortOption.startsWith(`${key}_`);
+                  const ascending = sortOption.endsWith("_asc");
+                  return (
+                    <th key={key} scope="col" aria-sort={selected ? ascending ? "ascending" : "descending" : undefined}>
+                      <button type="button" onClick={() => setSortOption(`${key}_${selected && !ascending ? "asc" : "desc"}`)}>
+                        {label}{selected && <span aria-hidden="true">{ascending ? " ↑" : " ↓"}</span>}
+                      </button>
+                    </th>
+                  );
+                })}
+                <th scope="col">Profile</th>
+              </tr>
+            </thead>
+            <tbody>
+              {freelancers.map((freelancer) => (
+                <tr key={freelancer.id}>
+                  <td>
+                    <strong>{freelancer.displayName || "Anonymous Freelancer"}</strong>
+                    <AddressField address={freelancer.stellarAddress} truncate qr />
+                    {freelancer.bio && <p>{freelancer.bio}</p>}
+                  </td>
+                  <td>
+                    {freelancer.totalRatings > 0 ? (
+                      <>
+                        <strong>★ {freelancer.averageScore.toFixed(2)} / 5</strong>
+                        <div className="muted">{freelancer.totalRatings} {freelancer.totalRatings === 1 ? "rating" : "ratings"}</div>
+                      </>
+                    ) : "No ratings yet"}
+                  </td>
+                  <td>{freelancer.completedJobsCount} {freelancer.completedJobsCount === 1 ? "job completed" : "jobs completed"}</td>
+                  <td><time dateTime={freelancer.createdAt}>{new Date(freelancer.createdAt).toLocaleDateString()}</time></td>
+                  <td><Link to={`/profile/${freelancer.stellarAddress}`}>View Profile →</Link></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
 

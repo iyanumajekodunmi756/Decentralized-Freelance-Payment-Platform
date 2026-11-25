@@ -7,6 +7,7 @@
  */
 
 import { z } from "zod";
+import { MAX_DELIVERABLE_DATA_URL_LENGTH, sanitizeDeliverable } from "./sanitizer";
 import { JobStatus } from "@prisma/client";
 import { isSkillTag, MAX_JOB_TAGS, SKILL_TAG_SLUGS } from "./tags";
 import { isValidStellarAddress } from "./stellarAddress";
@@ -19,7 +20,6 @@ export const MAX_JOB_DESCRIPTION_LENGTH = 5000;
 export const MAX_MILESTONE_DESCRIPTION_LENGTH = 1000;
 export const MAX_COVER_LETTER_LENGTH = 3000;
 export const MAX_DELIVERABLE_DESCRIPTION_LENGTH = 1000;
-export const MAX_FILE_URL_LENGTH = 2048;
 
 /**
  * A milestone amount, in whole units of the job's asset (issue #41): a
@@ -127,17 +127,21 @@ export const createProposalSchema = z.object({
   proposedRate: amountSchema.optional(),
 });
 
-export const createDeliverableSchema = z.object({
+export const deliverableUploadSchema = z.object({
   fileName: z.string().min(1).max(255),
-  fileUrl: z
-    .string()
-    .max(MAX_FILE_URL_LENGTH, `fileUrl must be at most ${MAX_FILE_URL_LENGTH} characters`)
-    .url("fileUrl must be a valid URL")
-    .refine(
-      (url) => url.startsWith("https://") || url.startsWith("http://"),
-      "fileUrl must use the http or https scheme",
-    ),
+  fileUrl: z.string().max(MAX_DELIVERABLE_DATA_URL_LENGTH),
   fileSize: z.number().int().positive().optional(),
   fileType: z.string().max(100).optional(),
   description: z.string().max(MAX_DELIVERABLE_DESCRIPTION_LENGTH).optional(),
+});
+
+export const createDeliverableSchema = deliverableUploadSchema.transform((value, ctx) => {
+  const attachment = sanitizeDeliverable(value);
+  if (attachment) return attachment;
+  ctx.addIssue({
+    code: "custom",
+    path: ["fileUrl"],
+    message: "Attach a valid PDF, PNG, JPEG or ZIP file with matching metadata",
+  });
+  return z.NEVER;
 });

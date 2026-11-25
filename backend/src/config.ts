@@ -73,6 +73,14 @@ const schema = z.object({
   // DATABASE_TIMEOUT_MS controls query statement_timeout in ms and pool_timeout (default: 10_000).
   DATABASE_POOL_SIZE: z.coerce.number().int().positive().default(10),
   DATABASE_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
+  // Optional PostgreSQL read replica. When set, /health probes it and reports
+  // replication lag; when unset, the health response is unchanged (issue #381).
+  REPLICA_URL: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z.string().url().optional(),
+  ),
+  // Replication lag above this threshold marks the health response DEGRADED.
+  REPLICA_LAG_THRESHOLD_MS: z.coerce.number().int().positive().default(30_000),
   // Redis configuration for distributed rate limiting in multi-replica deployments (issue #234).
   // If REDIS_URL is set, rate limiters use Redis store instead of in-memory storage.
   // Format: redis://[user:password@]host[:port][/db] or rediss:// for TLS.

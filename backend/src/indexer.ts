@@ -123,7 +123,10 @@ export function buildEventFilters(contractIds: readonly string[]): SorobanRpc.Ap
   return unique.length > 0 ? [{ type: "contract", contractIds: unique }] : [];
 }
 
-const rpcServer = new SorobanRpc.Server(config.SOROBAN_RPC_URL, { allowHttp: false });
+const rpcServer = new SorobanRpc.Server(
+  config.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org",
+  { allowHttp: config.SOROBAN_RPC_URL ? config.SOROBAN_RPC_URL.startsWith("http://") : false },
+);
 
 /**
  * The most recent chain tip seen in a `getEvents` response.

@@ -104,7 +104,8 @@ Client / Freelancer ── submit(rater, ratee, escrow_id, score) ──► Repu
 ```
 
 - **escrow** enforces the state machine `Created → Active → Completed`, with
-  `Disputed → Completed` (via arbitration) and `Active → Refunded` (expiry).
+  `Disputed → Completed` (via arbitration), `Active → Refunded` (expiry) and
+  `Created → Cancelled` (the client closes an unfunded job).
 - **dispute** can only change escrow funds through `escrow.resolve`, which
   independently checks that the shares sum to the funds held.
 - **reputation** refuses any rating unless escrow reports the job `Completed`
@@ -133,6 +134,7 @@ state machine, cross-contract calls, and the backend's role — see
 | `set_dispute_timeout(timeout_seconds)` | Admin-only; configures the positive timeout for future disputes (default: 7 days) |
 | `create(client, freelancer, token, milestones, expiry)` | Creates an unfunded escrow and returns its id |
 | `update_milestones(escrow_id, milestones)` | Client-only milestone editing, before funding |
+| `cancel(escrow_id)` | Client-only; closes an unfunded `Created` escrow, which becomes `Cancelled` |
 | `fund(escrow_id)` | Client-only; moves the asset into escrow before expiry and activates the job |
 | `release_milestone(escrow_id, milestone_index)` | Releases a whole milestone to the freelancer |
 | `release_partial(escrow_id, milestone_index, amount)` | Releases part of a milestone; tracks `released_amount` |

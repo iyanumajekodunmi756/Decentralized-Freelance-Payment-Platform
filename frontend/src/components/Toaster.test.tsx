@@ -7,10 +7,13 @@
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { ToastProvider } from "../hooks/ToastProvider";
 import { useToasts, type ToastContextValue } from "../hooks/toast-context";
 import Toaster from "./Toaster";
+import { copyText } from "../lib/clipboard";
+
+vi.mock("../lib/clipboard", () => ({ copyText: vi.fn().mockResolvedValue(true) }));
 
 // The real module pulls in the Stellar SDK for network config; only the URL
 // helper is used here.
@@ -87,6 +90,17 @@ describe("Toaster", () => {
 
     const link = screen.getByRole("link", { name: /stellar\.expert/i }) as HTMLAnchorElement;
     expect(link.href).toBe("https://stellar.expert/explorer/testnet/tx/abc123");
+  });
+
+  it("copies the full confirmed transaction hash", async () => {
+    renderToaster();
+    act(() => {
+      const id = api!.start("Building transaction");
+      api!.update(id, "confirmed", "Confirmed", "full-transaction-hash");
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Copy transaction hash" }));
+    expect(await screen.findByText("Copied")).toBeTruthy();
+    expect(copyText).toHaveBeenCalledWith("full-transaction-hash");
   });
 
   it("shows a failure as an alert carrying the mapped message", () => {

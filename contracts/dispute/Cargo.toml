@@ -14,3 +14,4 @@ interface = { path = "../interface" }
 soroban-sdk = { workspace = true, features = ["testutils"] }
 escrow = { path = "../escrow" }
 reputation = { path = "../reputation" }
+proptest = { version = "1", default-features = false, features = ["std"] }

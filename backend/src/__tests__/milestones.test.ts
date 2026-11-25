@@ -95,7 +95,7 @@ describe("Milestone Deliverables API (Issue #65)", () => {
       const res = await fetch(`${baseUrl}/api/milestones/m_1/deliverables`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fileName: "work.zip", fileUrl: "https://example.com/work.zip" }),
+        body: JSON.stringify({ fileName: "work.zip", fileUrl: "data:application/zip;base64,UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==" }),
       });
       expect(res.status).toBe(401);
     });
@@ -110,7 +110,7 @@ describe("Milestone Deliverables API (Issue #65)", () => {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ fileName: "work.zip", fileUrl: "https://example.com/work.zip" }),
+        body: JSON.stringify({ fileName: "work.zip", fileUrl: "data:application/zip;base64,UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==" }),
       });
       expect(res.status).toBe(404);
     });
@@ -133,7 +133,7 @@ describe("Milestone Deliverables API (Issue #65)", () => {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ fileName: "work.zip", fileUrl: "https://example.com/work.zip" }),
+        body: JSON.stringify({ fileName: "work.zip", fileUrl: "data:application/zip;base64,UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==" }),
       });
       expect(res.status).toBe(403);
       const json = (await res.json()) as any;
@@ -158,7 +158,7 @@ describe("Milestone Deliverables API (Issue #65)", () => {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ fileName: "work.zip", fileUrl: "https://example.com/work.zip" }),
+        body: JSON.stringify({ fileName: "work.zip", fileUrl: "data:application/zip;base64,UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==" }),
       });
       expect(res.status).toBe(400);
       const json = (await res.json()) as any;
@@ -184,8 +184,8 @@ describe("Milestone Deliverables API (Issue #65)", () => {
         id: "deliv_1",
         milestoneId: "m_1",
         fileName: "design_spec.pdf",
-        fileUrl: "https://example.com/design_spec.pdf",
-        fileSize: 10240,
+        fileUrl: "data:application/pdf;base64,JVBERi0xLjcKJSVFT0Y=",
+        fileSize: 14,
         fileType: "application/pdf",
         description: "Complete design spec for milestone 1",
         uploadedById: "user_freelancer_id",
@@ -199,10 +199,10 @@ describe("Milestone Deliverables API (Issue #65)", () => {
         },
         body: JSON.stringify({
           fileName: "design_spec.pdf",
-          fileUrl: "https://example.com/design_spec.pdf",
-          fileSize: 10240,
+          fileUrl: "data:application/pdf;base64,JVBERi0xLjcKJSVFT0Y=",
+          fileSize: 14,
           fileType: "application/pdf",
-          description: "Complete design spec for milestone 1",
+          description: "<b>Complete design spec for milestone 1</b>",
         }),
       });
 
@@ -215,12 +215,29 @@ describe("Milestone Deliverables API (Issue #65)", () => {
           data: expect.objectContaining({
             milestoneId: "m_1",
             fileName: "design_spec.pdf",
-            fileSize: 10240,
+            fileSize: 14,
+            description: "Complete design spec for milestone 1",
             uploadedById: "user_freelancer_id",
           }),
         }),
       );
     });
+  });
+
+  it("rejects a mismatched image header and an unsupported SVG type before storing", async () => {
+    const token = await tokenFor(FREELANCER);
+    for (const fileUrl of [
+      "data:image/png;base64,dGV4dA==",
+      "data:image/svg+xml;base64,PHN2Zy8+",
+    ]) {
+      const res = await fetch(`${baseUrl}/api/milestones/m_1/deliverables`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ fileName: "work.png", fileUrl }),
+      });
+      expect(res.status).toBe(400);
+    }
+    expect(h.deliverable.create).not.toHaveBeenCalled();
   });
 
   describe("GET /api/milestones/:id/deliverables", () => {
@@ -273,8 +290,8 @@ describe("Milestone Deliverables API (Issue #65)", () => {
       h.deliverable.create.mockResolvedValue({
         id: "deliv_idx_1",
         milestoneId: "m_index_0",
-        fileName: "code.tar.gz",
-        fileUrl: "https://example.com/code.tar.gz",
+        fileName: "code.zip",
+        fileUrl: "data:application/zip;base64,UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==",
       });
 
       const res = await fetch(`${baseUrl}/api/jobs/job_1/milestones/0/deliverables`, {
@@ -284,8 +301,8 @@ describe("Milestone Deliverables API (Issue #65)", () => {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          fileName: "code.tar.gz",
-          fileUrl: "https://example.com/code.tar.gz",
+          fileName: "code.zip",
+          fileUrl: "data:application/zip;base64,UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==",
         }),
       });
 
@@ -307,7 +324,7 @@ describe("Milestone Deliverables API (Issue #65)", () => {
         index: 0,
       });
       h.deliverable.findMany.mockResolvedValue([
-        { id: "deliv_idx_1", fileName: "code.tar.gz" },
+        { id: "deliv_idx_1", fileName: "code.zip" },
       ]);
 
       const res = await fetch(`${baseUrl}/api/jobs/job_1/milestones/0/deliverables`, {
@@ -316,7 +333,7 @@ describe("Milestone Deliverables API (Issue #65)", () => {
       expect(res.status).toBe(200);
       const json = (await res.json()) as any;
       expect(json).toHaveLength(1);
-      expect(json[0].fileName).toBe("code.tar.gz");
+      expect(json[0].fileName).toBe("code.zip");
     });
 
     it("allows the client to read deliverables via job ID and index", async () => {

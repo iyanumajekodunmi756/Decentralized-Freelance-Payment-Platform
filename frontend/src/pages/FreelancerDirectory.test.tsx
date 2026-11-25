@@ -158,6 +158,15 @@ describe("FreelancerDirectory component (#68)", () => {
       );
     });
 
+    fireEvent.click(screen.getByRole("button", { name: "Joined" }));
+    await waitFor(() => expect(api.fetchFreelancers).toHaveBeenLastCalledWith(
+      expect.objectContaining({ sortBy: "recent", sortOrder: "desc" }), expect.anything(),
+    ));
+    fireEvent.click(screen.getByRole("button", { name: "Joined" }));
+    await waitFor(() => expect(api.fetchFreelancers).toHaveBeenLastCalledWith(
+      expect.objectContaining({ sortBy: "recent", sortOrder: "asc" }), expect.anything(),
+    ));
+
     // Change sort to most completed jobs
     fireEvent.change(select, { target: { value: "jobs_desc" } });
 

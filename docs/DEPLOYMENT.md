@@ -188,6 +188,8 @@ Build is `backend/Dockerfile`; it executes `node dist/server.js`. Attach a Postg
 | `DATABASE_URL` | connection string for the managed Postgres |
 | `DATABASE_POOL_SIZE` | optional Prisma connection pool limit (default `10`). Recommended setting: `num_physical_cores * 2 + 1` or sized to container memory/connections to prevent pool starvation (P2024 error) under high concurrency |
 | `DATABASE_TIMEOUT_MS` | optional database query statement timeout and pool acquisition timeout in ms (default `10000`) |
+| `REPLICA_URL` | optional PostgreSQL read replica connection string. When set, `/health` probes it with `pg_last_xact_replay_timestamp()` and reports lag metrics (issue #381). Unset leaves the health payload unchanged |
+| `REPLICA_LAG_THRESHOLD_MS` | replication lag above this many milliseconds marks `/health` as `degraded` with HTTP 503 (default `30000`) |
 | `JWT_SECRET` | **at least 32 characters** — the config schema exits the process otherwise |
 | `NODE_ENV` | `production` |
 | `STELLAR_NETWORK` | `testnet` |

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { DisputeContractData } from "../hooks/useEscrow";
 
 // Hoisted so the vi.mock factories below can reference them.
 const h = vi.hoisted(() => ({
@@ -12,6 +13,10 @@ const h = vi.hoisted(() => ({
     reclaimExpired: vi.fn(),
     submitRating: vi.fn(),
     getDisputeDeadline: vi.fn(),
+    getArbitrators: vi.fn(async () => ["GARB1", "GARB2", "GARB3"]),
+    getDisputeThreshold: vi.fn(async () => 2),
+    getDisputeRecord: vi.fn(async (): Promise<DisputeContractData | null> => null),
+    approveDisputeSplit: vi.fn(),
     isPending: vi.fn(() => false),
     hasPendingWrite: vi.fn(() => false),
     error: null as string | null,
@@ -141,6 +146,14 @@ beforeEach(() => {
   h.escrow.reclaimExpired.mockResolvedValue({ hash: "RECLAIMEXPIREDHASH", result: undefined });
   h.escrow.getDisputeDeadline.mockReset();
   h.escrow.getDisputeDeadline.mockResolvedValue(BigInt(nowSeconds() + 3 * 86_400));
+  h.escrow.getArbitrators.mockReset();
+  h.escrow.getArbitrators.mockResolvedValue(["GARB1", "GARB2", "GARB3"]);
+  h.escrow.getDisputeThreshold.mockReset();
+  h.escrow.getDisputeThreshold.mockResolvedValue(2);
+  h.escrow.getDisputeRecord.mockReset();
+  h.escrow.getDisputeRecord.mockResolvedValue(null);
+  h.escrow.approveDisputeSplit.mockReset();
+  h.escrow.approveDisputeSplit.mockResolvedValue({ hash: "SPLITHASH", result: undefined });
   h.escrow.isPending.mockReset();
   h.escrow.isPending.mockReturnValue(false);
   h.escrow.hasPendingWrite.mockReset();
@@ -811,6 +824,85 @@ describe("JobDetail partial milestone release (Issue #256)", () => {
 
     await waitFor(() => {
       expect(h.escrow.releasePartial).toHaveBeenCalledWith(7n, 0, 5_000_000n);
+    });
+  });
+
+  describe("JobDetail Multi-Arbitrator Voting & Resolution (Issue #257)", () => {
+    it("displays panel members, voting progress indicator and threshold", async () => {
+      h.escrow.getEscrow.mockResolvedValue(DISPUTED);
+      h.escrow.getArbitrators.mockResolvedValue([
+        "GARB11111111111111111111111111111111111111111111111111111111",
+        "GARB22222222222222222222222222222222222222222222222222222222",
+      ]);
+      h.escrow.getDisputeThreshold.mockResolvedValue(2);
+
+      render(<JobDetail />);
+
+      expect(await screen.findByRole("heading", { name: "Multi-Arbitrator Panel & Voting Progress" })).toBeTruthy();
+      expect(screen.getByText(/2 of 2 panel members required/)).toBeTruthy();
+      expect(screen.getByText(/Panel Arbitrators \(2\)/)).toBeTruthy();
+    });
+
+    it("displays resolution confirmation once threshold is reached", async () => {
+      h.escrow.getEscrow.mockResolvedValue(DISPUTED);
+      h.escrow.getArbitrators.mockResolvedValue(["GARB11111111111111111111111111111111111111111111111111111111"]);
+      h.escrow.getDisputeThreshold.mockResolvedValue(1);
+      h.escrow.getDisputeRecord.mockResolvedValue({
+        escrow_id: 7n,
+        escrow_contract: "ESCROW",
+        raised_by: "GCLIENT",
+        reason: "work incomplete",
+        status: "Resolved",
+        raised_at: 1000n,
+        client_share: 50n,
+        freelancer_share: 50n,
+      });
+      h.fetchJobByEscrow.mockResolvedValue({
+        id: "job-1",
+        disputes: [{ id: "dispute-1", onChainId: "1", status: "RESOLVED" }],
+      });
+
+      render(<JobDetail />);
+
+      expect(
+        await screen.findByText(/Resolution threshold reached \(1 of 1 approvals\)\. Dispute resolution confirmed\./),
+      ).toBeTruthy();
+    });
+
+    it("allows a logged-in panel arbitrator to view split proposal and cast vote", async () => {
+      const ARBITRATOR = "GARBITRATOR1111111111111111111111111111111111111111111111111111";
+      h.wallet.publicKey = ARBITRATOR;
+      h.escrow.getEscrow.mockResolvedValue(DISPUTED);
+      h.escrow.getArbitrators.mockResolvedValue([
+        ARBITRATOR,
+        "GARB22222222222222222222222222222222222222222222222222222222",
+      ]);
+      h.escrow.getDisputeThreshold.mockResolvedValue(2);
+      h.escrow.getDisputeRecord.mockResolvedValue({
+        escrow_id: 7n,
+        escrow_contract: "ESCROW",
+        raised_by: "GCLIENT",
+        reason: "work incomplete",
+        status: "UnderReview",
+        raised_at: 1000n,
+        client_share: 0n,
+        freelancer_share: 0n,
+      });
+      h.fetchJobByEscrow.mockResolvedValue({
+        id: "job-1",
+        disputes: [{ id: "dispute-1", onChainId: "1", status: "UNDER_REVIEW" }],
+      });
+
+      render(<JobDetail />);
+
+      expect(await screen.findByRole("button", { name: "Approve Split" })).toBeTruthy();
+      expect(screen.getByText("You (Arbitrator)")).toBeTruthy();
+
+      fireEvent.click(screen.getByRole("button", { name: "Approve Split" }));
+
+      await waitFor(() => {
+        expect(h.escrow.approveDisputeSplit).toHaveBeenCalled();
+      });
     });
   });
 });

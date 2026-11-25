@@ -45,6 +45,7 @@ of the state tables keeps a transaction hash.
 | `DisputeOpened` | `dispute_opened` | `escrow_id: u64` | `initiator: Address` |
 | `Resolved` | `resolved` | `escrow_id: u64` | `client_share: i128`, `freelancer_share: i128` |
 | `Refunded` | `refunded` | `escrow_id: u64` | `client: Address`, `amount: i128` |
+| `Cancelled` | `cancelled` | `escrow_id: u64` | `client: Address` |
 | `MilestonesUpdated` | `milestones_updated` | `escrow_id: u64` | `count: u32`, `total_amount: i128` |
 | `DisputeContractProposed` | `dispute_contract_proposed` | `admin: Address` | `new_contract: Address`, `effective_at: u64` |
 | `DisputeProposalCancelled` | `dispute_proposal_cancelled` | `admin: Address` | `cancelled_contract: Address` |

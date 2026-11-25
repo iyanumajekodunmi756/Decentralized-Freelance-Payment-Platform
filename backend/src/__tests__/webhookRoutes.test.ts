@@ -83,6 +83,23 @@ describe("Webhook API routes (issue #313)", () => {
     );
   });
 
+  it("generates a separate 32-byte secret for each omitted secret", async () => {
+    const secrets: string[] = [];
+    for (const suffix of ["first", "second"]) {
+      h.create.mockImplementationOnce(async ({ data }) => data);
+      const response = await fetch(`${baseUrl}/api/webhooks`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: `https://example.com/${suffix}` }),
+      });
+      expect(response.status).toBe(201);
+      const data = (await response.json()) as { secret: string };
+      secrets.push(data.secret);
+    }
+    expect(secrets).toEqual(secrets.map(() => expect.stringMatching(/^[a-f0-9]{64}$/)));
+    expect(new Set(secrets).size).toBe(2);
+  });
+
   it("POST /api/webhooks rejects an invalid URL with 400", async () => {
     const res = await fetch(`${baseUrl}/api/webhooks`, {
       method: "POST",

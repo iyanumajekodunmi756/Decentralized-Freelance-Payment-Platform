@@ -44,6 +44,11 @@ export default function Conversation({ jobId }: { jobId: string }) {
   const initialScrollDoneRef = useRef(false);
   const userSentMessageRef = useRef(false);
   const prevMessageIdsRef = useRef<string>("");
+  const initialLoadDoneRef = useRef(false);
+
+  useEffect(() => {
+    initialLoadDoneRef.current = false;
+  }, [jobId, publicKey]);
 
   const checkIfAtBottom = useCallback(() => {
     if (listRef.current && listRef.current.scrollHeight > listRef.current.clientHeight) {
@@ -74,11 +79,28 @@ export default function Conversation({ jobId }: { jobId: string }) {
     try {
       const token = await authenticate(publicKey, signMessage);
       const list = await fetchMessages(jobId, token);
-      setMessages(list);
-      setUnreadAtOpen(
-        list.filter((m) => m.sender?.stellarAddress !== publicKey && m.readAt === null).length,
-      );
-      await markMessagesRead(jobId, token);
+      const unreadCount = list.filter(
+        (m) => m.sender?.stellarAddress !== publicKey && m.readAt === null,
+      ).length;
+
+      if (!initialLoadDoneRef.current) {
+        setUnreadAtOpen(unreadCount);
+        initialLoadDoneRef.current = true;
+      }
+
+      if (unreadCount > 0) {
+        await markMessagesRead(jobId, token);
+        const now = new Date().toISOString();
+        setMessages(
+          list.map((m) =>
+            m.sender?.stellarAddress !== publicKey && m.readAt === null
+              ? { ...m, readAt: now }
+              : m,
+          ),
+        );
+      } else {
+        setMessages(list);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -119,6 +141,56 @@ export default function Conversation({ jobId }: { jobId: string }) {
     initialScrollDoneRef.current = true;
     userSentMessageRef.current = false;
   }, [messages]);
+
+  // Real-time chat message stream (issue #250: SSE gateway with polling fallback)
+  useEffect(() => {
+    if (!publicKey || typeof EventSource === "undefined") return;
+
+    let eventSource: EventSource | null = null;
+    let isCancelled = false;
+
+    async function initStream() {
+      try {
+        const token = await authenticate(publicKey!, signMessage);
+        if (isCancelled) return;
+
+        const url = `/api/messages/${encodeURIComponent(jobId)}/stream?token=${encodeURIComponent(token)}`;
+        eventSource = new EventSource(url);
+
+        eventSource.onmessage = (event) => {
+          try {
+            const newMsg = JSON.parse(event.data) as MessageApi;
+            if (!newMsg || !newMsg.id) return;
+
+            setMessages((prev) => {
+              if (prev.some((m) => m.id === newMsg.id)) return prev;
+              return [...prev, newMsg];
+            });
+
+            if (newMsg.sender?.stellarAddress !== publicKey) {
+              void markMessagesRead(jobId, token);
+            }
+          } catch {
+            // Ignore malformed event payload
+          }
+        };
+
+        eventSource.onerror = () => {
+          // Close on error; polling provides uninterrupted fallback
+          eventSource?.close();
+        };
+      } catch {
+        // Fall back to polling
+      }
+    }
+
+    void initStream();
+
+    return () => {
+      isCancelled = true;
+      eventSource?.close();
+    };
+  }, [jobId, publicKey, signMessage]);
 
   // Poll for new messages every 5 seconds
   useEffect(() => {

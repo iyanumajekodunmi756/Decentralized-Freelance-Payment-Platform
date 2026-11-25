@@ -13,11 +13,18 @@
 import { useState } from "react";
 import { explorerContractUrl, explorerTxUrl } from "../lib/stellar";
 import { useToasts } from "../hooks/toast-context";
+import { copyText } from "../lib/clipboard";
 import MobileSignModal from "./MobileSignModal";
 
 export default function Toaster() {
   const { toasts, dismiss } = useToasts();
+  const [copyFeedback, setCopyFeedback] = useState<{ hash: string; text: string } | null>(null);
   const [mobileXdr, setMobileXdr] = useState<string | null>(null);
+
+  async function copyHash(hash: string) {
+    const copied = await copyText(hash);
+    setCopyFeedback({ hash, text: copied ? "Copied" : "Copy failed" });
+  }
 
   if (toasts.length === 0 && !mobileXdr) return null;
 
@@ -64,6 +71,10 @@ export default function Toaster() {
                 <a href={explorerTxUrl(toast.hash)} target="_blank" rel="noreferrer" title={toast.hash}>
                   View on stellar.expert
                 </a>
+                <button type="button" onClick={() => void copyHash(toast.hash!)}>
+                  Copy transaction hash
+                </button>
+                {copyFeedback?.hash === toast.hash && <span>{copyFeedback.text}</span>}
               </>
             )}
             {toast.assetContractId && (

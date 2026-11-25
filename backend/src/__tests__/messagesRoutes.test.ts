@@ -56,13 +56,14 @@ beforeAll(async () => {
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("no port assigned");
   baseUrl = `http://127.0.0.1:${address.port}`;
-});
+}, 60000);
 
 afterAll(async () => {
+  server.closeAllConnections?.();
   await new Promise<void>((resolve, reject) =>
     server.close((err) => (err ? reject(err) : resolve())),
   );
-});
+}, 10000);
 
 beforeEach(() => {
   for (const fn of [
@@ -326,5 +327,65 @@ describe("GET /api/messages/unread", () => {
     expect(res.body).toEqual({ total: 0, byJob: [] });
     // The job lookup belongs to /:jobId, which /unread must not fall through to.
     expect(h.job.findUnique).not.toHaveBeenCalled();
+  });
+});
+
+describe("GET /api/messages/:jobId/stream (issue #250)", () => {
+  it("rejects connection without token with 401", async () => {
+    const res = await fetch(`${baseUrl}/api/messages/job_1/stream`);
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects unauthorized third party with 403", async () => {
+    h.job.findUnique.mockResolvedValue(jobRow());
+    const token = await tokenFor(STRANGER);
+    const res = await fetch(`${baseUrl}/api/messages/job_1/stream?token=${token}`);
+    expect(res.status).toBe(403);
+  });
+
+  it("404s an unknown job", async () => {
+    h.job.findUnique.mockResolvedValue(null);
+    const token = await tokenFor(CLIENT);
+    const res = await fetch(`${baseUrl}/api/messages/job_missing/stream?token=${token}`);
+    expect(res.status).toBe(404);
+  });
+
+  it("establishes SSE stream and receives published message in real-time", async () => {
+    h.job.findUnique.mockResolvedValue(jobRow());
+    h.message.create.mockImplementation((args: { data: Record<string, unknown> }) =>
+      Promise.resolve(messageRow({ ...args.data, senderId: "user_freelancer" })),
+    );
+
+    const token = await tokenFor(CLIENT);
+    const controller = new AbortController();
+    const res = await fetch(`${baseUrl}/api/messages/job_1/stream?token=${token}`, {
+      signal: controller.signal,
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+
+    const reader = res.body?.getReader();
+    expect(reader).toBeDefined();
+
+    const decoder = new TextDecoder();
+    const firstChunk = await reader!.read();
+    expect(decoder.decode(firstChunk.value)).toContain(": connected");
+
+    // Post a message and verify it arrives via the SSE stream
+    const postPromise = post("/job_1", FREELANCER, { body: "Real-time SSE test message" });
+    const messageChunkPromise = reader!.read();
+
+    const [postRes, chunk] = await Promise.all([postPromise, messageChunkPromise]);
+    expect(postRes.status).toBe(201);
+    const text = decoder.decode(chunk.value);
+    expect(text).toContain("Real-time SSE test message");
+
+    controller.abort();
+    try {
+      await reader!.cancel();
+    } catch {
+      // Ignore abort error
+    }
   });
 });

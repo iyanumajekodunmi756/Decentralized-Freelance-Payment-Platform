@@ -25,6 +25,7 @@ import NotificationsBell from "./components/NotificationsBell";
 import Logo from "./components/Logo";
 import JobDetailSkeleton from "./components/JobDetailSkeleton";
 import Toaster from "./components/Toaster";
+import SessionExpiredModal from "./components/SessionExpiredModal";
 
 // Dynamic route code splitting (issue #293)
 const Dashboard = lazy(() => import("./pages/Dashboard"));
@@ -98,6 +99,9 @@ export default function App() {
           </a>
           <Nav />
           <NetworkMismatchBanner />
+          {/* Global session-expiry prompt (issue #364). Rendered as an overlay so
+              the active route and any unsubmitted form state stay mounted. */}
+          <SessionExpiredModal />
           <Suspense fallback={<JobDetailSkeleton />}>
             <Routes>
               <Route path="/" element={<Dashboard />} />

@@ -6,6 +6,7 @@ import { prisma } from "./db";
 import { startIndexer } from "./indexer";
 import { createShutdownHandler } from "./lib/shutdown";
 import { startCleanupJob } from "./lib/cleanup";
+import { startWebhookRetryWorker } from "./lib/webhooks";
 import { verifyContractConfigurationSync } from "./lib/contractFreshness";
 
 async function main() {
@@ -44,9 +45,15 @@ async function main() {
     intervalMs: config.CLEANUP_INTERVAL_MS,
   });
 
+  // Automated webhook delivery retry worker with exponential backoff (issue #379)
+  const webhookRetry = startWebhookRetryWorker({
+    store: prisma,
+  });
+
   const shutdown = createShutdownHandler({
     stopIndexer: () => {
       cleanup.stop();
+      webhookRetry.stop();
       return indexer.stop();
     },
     closeServer: () =>

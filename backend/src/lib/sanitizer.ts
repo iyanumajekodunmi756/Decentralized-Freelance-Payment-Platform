@@ -6,6 +6,7 @@
  */
 
 import DOMPurify from "isomorphic-dompurify";
+import { sanitizeText } from "./sanitize";
 
 /**
  * Sanitize a chat message body to prevent script injection.
@@ -58,4 +59,54 @@ export function validateAndSanitizeMessageBody(body: string): string {
   }
 
   return sanitized;
+}
+
+const MAX_DELIVERABLE_BYTES = 5 * 1024 * 1024;
+export const MAX_DELIVERABLE_DATA_URL_LENGTH = 4 * Math.ceil(MAX_DELIVERABLE_BYTES / 3) + 64;
+
+const formats = {
+  "application/pdf": { extensions: /\.pdf$/i, headers: ["255044462d"] },
+  "image/png": { extensions: /\.png$/i, headers: ["89504e470d0a1a0a"] },
+  "image/jpeg": { extensions: /\.jpe?g$/i, headers: ["ffd8ff"] },
+  "application/zip": { extensions: /\.zip$/i, headers: ["504b0304", "504b0506"] },
+};
+
+function canonicalMime(type: string) {
+  return type.toLowerCase() === "application/x-zip-compressed"
+    ? "application/zip"
+    : type.toLowerCase();
+}
+
+export function sanitizeDeliverable(input: {
+  fileUrl: string;
+  fileName: string;
+  fileType?: string;
+  fileSize?: number;
+  description?: string;
+}) {
+  const dataUrl = /^data:([a-z/+-]+);base64,([A-Za-z0-9+/]+={0,2})$/i.exec(input.fileUrl);
+  if (!dataUrl || dataUrl[2].length % 4 !== 0) return undefined;
+
+  const fileType = canonicalMime(dataUrl[1]);
+  if (!Object.prototype.hasOwnProperty.call(formats, fileType)) return undefined;
+  const format = formats[fileType as keyof typeof formats];
+  const fileName = sanitizeText(input.fileName);
+  if (!format.extensions.test(fileName) || /[\\/]/.test(fileName)) return undefined;
+  if (input.fileType && canonicalMime(input.fileType) !== fileType) return undefined;
+
+  const bytes = Buffer.from(dataUrl[2], "base64");
+  const header = bytes.subarray(0, 8).toString("hex");
+  if (
+    bytes.length > MAX_DELIVERABLE_BYTES ||
+    (input.fileSize !== undefined && bytes.length !== input.fileSize) ||
+    !format.headers.some((signature) => header.startsWith(signature))
+  ) return undefined;
+
+  return {
+    fileName,
+    fileType,
+    fileSize: bytes.length,
+    fileUrl: `data:${fileType};base64,${bytes.toString("base64")}`,
+    description: input.description === undefined ? undefined : sanitizeText(input.description),
+  };
 }

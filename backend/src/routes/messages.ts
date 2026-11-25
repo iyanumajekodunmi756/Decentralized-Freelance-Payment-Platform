@@ -17,14 +17,18 @@
  */
 
 import { Router } from "express";
+import { EventEmitter } from "node:events";
 import { z } from "zod";
 import { prisma } from "../db";
-import { requireAuth } from "../middleware/auth";
+import { requireAuth, verifyAuthToken } from "../middleware/auth";
 import { validate } from "../middleware/validate";
 import { AppError } from "../middleware/errorHandler";
 import { validateAndSanitizeMessageBody } from "../lib/sanitizer";
 
 export const messagesRouter = Router();
+
+export const messageEmitter = new EventEmitter();
+messageEmitter.setMaxListeners(0);
 
 /** A message body is a chat line, not a document. */
 export const sendMessageSchema = z.object({
@@ -110,6 +114,55 @@ messagesRouter.get("/unread", requireAuth, async (_req, res, next) => {
   }
 });
 
+// GET /api/messages/:jobId/stream (issue #250: real-time chat SSE stream)
+messagesRouter.get("/:jobId/stream", async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+    const token =
+      (typeof req.query.token === "string" ? req.query.token : undefined) ||
+      (authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : undefined);
+
+    if (!token) {
+      throw new AppError(401, "Missing authorization token");
+    }
+
+    let address: string;
+    try {
+      address = await verifyAuthToken(token);
+    } catch (err) {
+      if (err instanceof AppError) throw err;
+      throw new AppError(401, "Invalid or expired token");
+    }
+
+    await loadParticipantJob(req.params.jobId, address);
+
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+
+    res.write(": connected\n\n");
+
+    const onMessage = (msg: unknown) => {
+      const m = msg as { jobId?: string };
+      if (m && m.jobId === req.params.jobId) {
+        res.write(`data: ${JSON.stringify(msg)}\n\n`);
+      }
+    };
+
+    messageEmitter.on("message", onMessage);
+
+    req.on("close", () => {
+      messageEmitter.off("message", onMessage);
+      res.end();
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/messages/:jobId
 messagesRouter.get("/:jobId", requireAuth, async (req, res, next) => {
   try {
@@ -150,6 +203,13 @@ messagesRouter.post("/:jobId", requireAuth, validate(sendMessageSchema), async (
     const message = await prisma.message.create({
       data: { jobId: job.id, senderId, body },
     });
+
+    // Publish new message event directly to connected SSE stream listeners (issue #250)
+    messageEmitter.emit("message", {
+      ...message,
+      sender: { stellarAddress: address, displayName: null },
+    });
+
     res.status(201).json(message);
   } catch (err) {
     next(err);

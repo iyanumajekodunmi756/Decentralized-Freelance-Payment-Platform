@@ -13,11 +13,11 @@
 extern crate std;
 
 use crate::{
-    EscrowContract, EscrowContractClient, EscrowError, EscrowStatus, Milestone,
-    DISPUTE_CONTRACT_TIMELOCK_SECONDS,
+    DataKey, EscrowContract, EscrowContractClient, EscrowError, EscrowStatus, Milestone,
+    DISPUTE_CONTRACT_TIMELOCK_SECONDS, MAX_ESCROW_DURATION_SECONDS, TTL_EXTEND_TO, TTL_THRESHOLD,
 };
 use soroban_sdk::{
-    testutils::{Address as _, Events as _, Ledger},
+    testutils::{storage::Persistent as _, Address as _, Events as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
     xdr::{self, Limits, ReadXdr},
     Address, BytesN, Env, Map, Symbol, TryFromVal, Val, Vec,
@@ -242,6 +242,64 @@ fn create_rejects_past_expiry() {
         &1_000, // == now
     );
     assert!(matches!(res, Err(Ok(EscrowError::InvalidExpiry))));
+}
+
+#[test]
+fn create_accepts_expiry_at_max_duration() {
+    let f = fixture();
+    // Exactly 365 days from the current ledger time is still valid.
+    let expiry = 1_000 + MAX_ESCROW_DURATION_SECONDS;
+    let id = f.c().create(
+        &f.client,
+        &f.freelancer,
+        &f.token,
+        &milestones(&f.env, &[100]),
+        &expiry,
+    );
+    assert_eq!(f.c().get(&id).expiry, expiry);
+}
+
+#[test]
+fn create_rejects_expiry_beyond_max_duration() {
+    let f = fixture();
+    // One second past the cap must be refused.
+    let expiry = 1_000 + MAX_ESCROW_DURATION_SECONDS + 1;
+    let res = f.c().try_create(
+        &f.client,
+        &f.freelancer,
+        &f.token,
+        &milestones(&f.env, &[100]),
+        &expiry,
+    );
+    assert!(matches!(res, Err(Ok(EscrowError::InvalidExpiry))));
+    // The rejected call must not have consumed an escrow id.
+    let id = f.c().create(
+        &f.client,
+        &f.freelancer,
+        &f.token,
+        &milestones(&f.env, &[100]),
+        &10_000,
+    );
+    assert_eq!(id, 0);
+}
+
+#[test]
+fn create_rejects_far_future_expiry_typo() {
+    let f = fixture();
+    // A milliseconds-instead-of-seconds style bug: ~50,000 years ahead.
+    for expiry in [1_700_000_000_000u64, u64::MAX] {
+        let res = f.c().try_create(
+            &f.client,
+            &f.freelancer,
+            &f.token,
+            &milestones(&f.env, &[100]),
+            &expiry,
+        );
+        assert!(
+            matches!(res, Err(Ok(EscrowError::InvalidExpiry))),
+            "expiry {expiry} must be rejected"
+        );
+    }
 }
 
 #[test]
@@ -483,6 +541,147 @@ fn update_milestones_after_expiry_is_rejected() {
     assert_eq!(data.milestones.len(), 2);
     assert_eq!(data.milestones.get(0).unwrap().amount, 300);
     assert!(!event_exists(&f.env, "milestones_updated"));
+}
+
+// ---------------------------------------------------------------------------
+// cancel
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cancel_marks_escrow_cancelled() {
+    let f = fixture();
+    let id = f.c().create(
+        &f.client,
+        &f.freelancer,
+        &f.token,
+        &milestones(&f.env, &[300, 700]),
+        &10_000,
+    );
+
+    f.c().cancel(&id);
+
+    let data = f.c().get(&id);
+    assert_eq!(data.status, EscrowStatus::Cancelled);
+    assert_eq!(data.total_amount, 1_000, "terms are kept for audit");
+    assert_eq!(f.balance(&f.client), 10_000, "no funds moved");
+    assert_eq!(f.balance(&f.escrow), 0, "nothing was ever deposited");
+}
+
+#[test]
+fn cancelled_event_carries_client() {
+    let f = fixture();
+    let id = f.c().create(
+        &f.client,
+        &f.freelancer,
+        &f.token,
+        &milestones(&f.env, &[1_000]),
+        &10_000,
+    );
+
+    f.c().cancel(&id);
+
+    let data = event_data(&f.env, "cancelled");
+    let client: Address = field(&f.env, &data, "client");
+    let escrow_id: u64 = event_topic1(&f.env, "cancelled");
+    assert_eq!(escrow_id, id);
+    assert_eq!(client, f.client);
+}
+
+#[test]
+fn cancel_after_funding_is_rejected() {
+    let f = fixture();
+    let id = f.funded(&[1_000]);
+    let res = f.c().try_cancel(&id);
+    assert!(matches!(res, Err(Ok(EscrowError::InvalidStatus))));
+    assert_eq!(f.c().get(&id).status, EscrowStatus::Active);
+    assert_eq!(f.balance(&f.escrow), 1_000, "funds stay in escrow");
+}
+
+#[test]
+fn cancel_after_dispute_is_rejected() {
+    let f = fixture();
+    let id = f.funded(&[1_000]);
+    f.c().open_dispute(&id, &f.client);
+    let res = f.c().try_cancel(&id);
+    assert!(matches!(res, Err(Ok(EscrowError::InvalidStatus))));
+    assert_eq!(f.c().get(&id).status, EscrowStatus::Disputed);
+}
+
+#[test]
+fn cancel_after_completion_is_rejected() {
+    let f = fixture();
+    let id = f.funded(&[1_000]);
+    f.c().release_milestone(&id, &0);
+    let res = f.c().try_cancel(&id);
+    assert!(matches!(res, Err(Ok(EscrowError::InvalidStatus))));
+}
+
+#[test]
+fn cancel_twice_is_rejected() {
+    let f = fixture();
+    let id = f.c().create(
+        &f.client,
+        &f.freelancer,
+        &f.token,
+        &milestones(&f.env, &[1_000]),
+        &10_000,
+    );
+    f.c().cancel(&id);
+    let res = f.c().try_cancel(&id);
+    assert!(matches!(res, Err(Ok(EscrowError::InvalidStatus))));
+}
+
+#[test]
+fn cancelled_escrow_cannot_be_funded_or_updated() {
+    let f = fixture();
+    let id = f.c().create(
+        &f.client,
+        &f.freelancer,
+        &f.token,
+        &milestones(&f.env, &[1_000]),
+        &10_000,
+    );
+    f.c().cancel(&id);
+
+    let res = f.c().try_fund(&id);
+    assert!(matches!(res, Err(Ok(EscrowError::InvalidStatus))));
+    let res = f
+        .c()
+        .try_update_milestones(&id, &milestones(&f.env, &[500]));
+    assert!(matches!(res, Err(Ok(EscrowError::InvalidStatus))));
+    assert_eq!(f.balance(&f.escrow), 0);
+}
+
+#[test]
+fn cancel_unknown_escrow_is_rejected() {
+    let f = fixture();
+    let res = f.c().try_cancel(&999);
+    assert!(matches!(res, Err(Ok(EscrowError::NotFound))));
+}
+
+#[test]
+fn cancel_is_blocked_while_paused() {
+    let f = fixture();
+    let admin = Address::generate(&f.env);
+    let dispute = Address::generate(&f.env);
+    f.c().init(&admin, &dispute);
+    let id = f.c().create(
+        &f.client,
+        &f.freelancer,
+        &f.token,
+        &milestones(&f.env, &[1_000]),
+        &10_000,
+    );
+
+    f.c().pause();
+    assert!(matches!(
+        f.c().try_cancel(&id),
+        Err(Ok(EscrowError::Paused))
+    ));
+
+    f.c().unpause();
+    f.c().cancel(&id);
+    assert_eq!(f.c().get(&id).status, EscrowStatus::Cancelled);
 }
 
 // ---------------------------------------------------------------------------
@@ -1147,6 +1346,78 @@ fn reclaim_after_dispute_timeout_requires_client_auth() {
 }
 
 // ---------------------------------------------------------------------------
+// dispute deadline TTL
+// ---------------------------------------------------------------------------
+
+/// TTL of `key` in the escrow contract's persistent storage.
+fn deadline_ttl(f: &Fixture, key: &DataKey) -> u32 {
+    f.env
+        .as_contract(&f.escrow, || f.env.storage().persistent().get_ttl(key))
+}
+
+/// Move the ledger forward until `key`'s TTL sits below the refresh threshold,
+/// leaving it still live. Returns the reduced TTL.
+fn age_below_ttl_threshold(f: &Fixture, key: &DataKey) -> u32 {
+    let ttl = deadline_ttl(f, key);
+    assert!(ttl > TTL_THRESHOLD, "entry should start with TTL headroom");
+    let seq = f.env.ledger().sequence();
+    f.env
+        .ledger()
+        .set_sequence_number(seq + (ttl - TTL_THRESHOLD) + 1);
+    let low = deadline_ttl(f, key);
+    assert!(low < TTL_THRESHOLD, "entry should now need a refresh");
+    low
+}
+
+#[test]
+fn dispute_deadline_read_extends_deadline_ttl() {
+    let f = fixture();
+    let id = f.funded(&[1_000]);
+    f.c().open_dispute(&id, &f.client);
+    let key = DataKey::DisputeDeadline(id);
+
+    let low = age_below_ttl_threshold(&f, &key);
+    assert!(low < TTL_THRESHOLD);
+
+    // The view must still answer, and its read must refresh the key.
+    assert_eq!(f.c().dispute_deadline(&id), 1_000 + 7 * 24 * 60 * 60);
+    let renewed = deadline_ttl(&f, &key);
+    assert!(
+        renewed > low,
+        "read should extend the TTL, not leave it stale"
+    );
+    assert!(renewed >= TTL_THRESHOLD);
+    assert!(renewed <= TTL_EXTEND_TO);
+}
+
+#[test]
+fn reclaim_after_dispute_timeout_refreshes_deadline_ttl() {
+    let f = fixture();
+    let id = f.funded(&[1_000]);
+    f.c().open_dispute(&id, &f.client);
+    let key = DataKey::DisputeDeadline(id);
+    let deadline = f.c().dispute_deadline(&id);
+
+    age_below_ttl_threshold(&f, &key);
+    f.env.ledger().set_timestamp(deadline + 1);
+    f.c().reclaim_after_dispute_timeout(&id);
+
+    assert_eq!(f.c().get(&id).status, EscrowStatus::Refunded);
+    let renewed = deadline_ttl(&f, &key);
+    assert!(renewed >= TTL_THRESHOLD);
+}
+
+#[test]
+fn dispute_deadline_without_an_open_dispute_is_not_found() {
+    let f = fixture();
+    let id = f.funded(&[1_000]);
+    // Reading a missing deadline must return `NotFound` rather than trap while
+    // trying to extend the TTL of an entry that does not exist.
+    let res = f.c().try_dispute_deadline(&id);
+    assert!(matches!(res, Err(Ok(EscrowError::NotFound))));
+}
+
+// ---------------------------------------------------------------------------
 // initialization / views
 // ---------------------------------------------------------------------------
 
@@ -1466,6 +1737,22 @@ fn set_dispute_timeout_requires_admin_auth() {
 
 #[test]
 #[should_panic]
+fn cancel_requires_client_auth() {
+    // A non-client cannot produce the client's authorization, so the call panics.
+    let f = fixture();
+    let id = f.c().create(
+        &f.client,
+        &f.freelancer,
+        &f.token,
+        &milestones(&f.env, &[1_000]),
+        &10_000,
+    );
+    f.env.set_auths(&[]);
+    f.c().cancel(&id);
+}
+
+#[test]
+#[should_panic]
 fn fund_requires_client_auth() {
     // Set up the escrow while auths are mocked, then disable mocking for the
     // call under test so the missing client authorization must panic.
@@ -1602,5 +1889,72 @@ fn create_rejects_milestone_maps_whose_keys_are_not_sorted() {
     assert!(
         err.contains("rejected") || err.contains("does not parse"),
         "unexpected failure: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Gas and Resource Profiling Benchmarks (issue #380)
+// ---------------------------------------------------------------------------
+
+fn run_milestone_profile(milestone_count: u32) -> (u64, u64) {
+    let f = fixture();
+    let amounts: std::vec::Vec<i128> = (0..milestone_count).map(|_| 100).collect();
+    let id = f.funded(&amounts);
+
+    f.env.cost_estimate().budget().reset_unlimited();
+    for i in 0..milestone_count {
+        f.c().release_milestone(&id, &i);
+    }
+
+    let cpu = f.env.cost_estimate().budget().cpu_instruction_cost();
+    // memory_byte_cost:
+    let mem = f.env.cost_estimate().budget().memory_bytes_cost();
+    (cpu, mem)
+}
+
+#[test]
+fn profile_escrow_milestones_1() {
+    let (cpu, mem) = run_milestone_profile(1);
+    std::println!("[GAS_PROFILE] milestones: 1 | cpu: {} | mem: {}", cpu, mem);
+    assert!(cpu < 20_000_000, "1 milestone release CPU exceeded budget");
+    assert!(
+        mem < 5_000_000,
+        "1 milestone release Memory exceeded budget"
+    );
+}
+
+#[test]
+fn profile_escrow_milestones_5() {
+    let (cpu, mem) = run_milestone_profile(5);
+    std::println!("[GAS_PROFILE] milestones: 5 | cpu: {} | mem: {}", cpu, mem);
+    assert!(cpu < 40_000_000, "5 milestone release CPU exceeded budget");
+    assert!(
+        mem < 10_000_000,
+        "5 milestone release Memory exceeded budget"
+    );
+}
+
+#[test]
+fn profile_escrow_milestones_10() {
+    let (cpu, mem) = run_milestone_profile(10);
+    std::println!("[GAS_PROFILE] milestones: 10 | cpu: {} | mem: {}", cpu, mem);
+    assert!(cpu < 70_000_000, "10 milestone release CPU exceeded budget");
+    assert!(
+        mem < 20_000_000,
+        "10 milestone release Memory exceeded budget"
+    );
+}
+
+#[test]
+fn profile_escrow_milestones_20() {
+    let (cpu, mem) = run_milestone_profile(20);
+    std::println!("[GAS_PROFILE] milestones: 20 | cpu: {} | mem: {}", cpu, mem);
+    assert!(
+        cpu < 100_000_000,
+        "20 milestone release CPU exceeded protocol limit"
+    );
+    assert!(
+        mem < 40_000_000,
+        "20 milestone release Memory exceeded protocol limit"
     );
 }

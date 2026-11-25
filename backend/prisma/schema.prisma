@@ -539,3 +539,31 @@ model ArchivedJob {
   @@index([status, archivedAt])
 }
 
+// ---------------------------------------------------------------------------
+// Webhook Deliveries & Retries (issue #379)
+// ---------------------------------------------------------------------------
+enum WebhookDeliveryStatus {
+  PENDING_RETRY
+  SUCCESS
+  DEAD_LETTER
+}
+
+model WebhookDelivery {
+  id             String                @id @default(cuid())
+  subscriptionId String?
+  url            String
+  secret         String
+  event          String
+  payload        String
+  status         WebhookDeliveryStatus @default(PENDING_RETRY)
+  attempts       Int                   @default(1)
+  maxAttempts    Int                   @default(5)
+  nextRetryAt    DateTime              @default(now())
+  responseCode   Int?
+  lastError      String?
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+
+  @@index([status, nextRetryAt])
+  @@index([subscriptionId])
+}

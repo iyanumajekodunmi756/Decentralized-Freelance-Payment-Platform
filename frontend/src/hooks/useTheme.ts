@@ -6,7 +6,7 @@
  * with document.documentElement's data-theme attribute.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export type Theme = "light" | "dark";
 
@@ -36,15 +36,11 @@ export function getInitialTheme(): Theme {
 }
 
 export function useTheme() {
-  const [theme, setTheme] = useState<Theme>(getInitialTheme);
+  const [theme, setCurrentTheme] = useState<Theme>(getInitialTheme);
+  const explicitChoice = useRef(false);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
-    try {
-      localStorage.setItem(THEME_STORAGE_KEY, theme);
-    } catch {
-      // Ignore localStorage errors
-    }
   }, [theme]);
 
   // Listen to system theme changes if no explicit user preference was saved in localStorage
@@ -53,14 +49,14 @@ export function useTheme() {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
 
     const listener = (e: MediaQueryListEvent) => {
+      if (explicitChoice.current) return;
+      let saved: string | null = null;
       try {
-        const saved = localStorage.getItem(THEME_STORAGE_KEY);
-        if (!saved) {
-          setTheme(e.matches ? "dark" : "light");
-        }
+        saved = localStorage.getItem(THEME_STORAGE_KEY);
       } catch {
-        setTheme(e.matches ? "dark" : "light");
+        // Follow system changes when storage is unavailable.
       }
+      if (saved !== "dark" && saved !== "light") setCurrentTheme(e.matches ? "dark" : "light");
     };
 
     if (media.addEventListener) {
@@ -72,9 +68,17 @@ export function useTheme() {
     }
   }, []);
 
-  const toggleTheme = () => {
-    setTheme((prev) => (prev === "dark" ? "light" : "dark"));
+  const setTheme = (mode: Theme) => {
+    explicitChoice.current = true;
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, mode);
+    } catch {
+      // An explicit choice still works for this session.
+    }
+    setCurrentTheme(mode);
   };
+
+  const toggleTheme = () => setTheme(theme === "dark" ? "light" : "dark");
 
   return { theme, setTheme, toggleTheme };
 }

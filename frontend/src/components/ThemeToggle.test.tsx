@@ -37,6 +37,7 @@ describe("ThemeToggle", () => {
     const button = screen.getByRole("button", { name: /switch to dark theme/i });
     expect(button).toBeDefined();
     expect(button.getAttribute("aria-pressed")).toBe("false");
+    expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBeNull();
   });
 
   it("toggles theme to dark when clicked and persists to localStorage", () => {

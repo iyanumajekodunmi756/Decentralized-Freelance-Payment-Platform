@@ -137,11 +137,13 @@ Client / Freelancer ── submit(rater, ratee, escrow_id, score) ── verify 
 State machine (escrow):
 
 ```
-Created ──fund──► Active ──release all──► Completed
-                    │
-                    ├──open_dispute──► Disputed ──resolve──► Completed
-                    │                     └──(past dispute deadline)──► Refunded
-                    └──(past expiry)──► Refunded
+Created ──cancel──► Cancelled (nothing was funded)
+   │
+   └──fund──► Active ──release all──► Completed
+                 │
+                 ├──open_dispute──► Disputed ──resolve──► Completed
+                 │                     └──(past dispute deadline)──► Refunded
+                 └──(past expiry)──► Refunded
 ```
 
 Details of the dispute panel and timelock are in
@@ -158,6 +160,7 @@ Details of the dispute panel and timelock are in
 | escrow | `set_dispute_timeout(timeout_seconds)` | admin-only; sets the positive timeout used by future disputes |
 | escrow | `create(client, freelancer, token, milestones, expiry)` | validates amounts/expiry; returns id |
 | escrow | `update_milestones(escrow_id, milestones)` | client-only, while still `Created` (before funding); re-validates and recomputes the total |
+| escrow | `cancel(escrow_id)` | client-only, while still `Created`; closes the escrow as `Cancelled` and emits a `cancelled` event |
 | escrow | `fund(escrow_id)` | client deposits the total before the expiry timestamp |
 | escrow | `release_milestone(escrow_id, milestone_index)` | client-only; completes the job on the last one |
 | escrow | `release_partial(escrow_id, milestone_index, amount)` | client-only; pays part of a milestone and tracks `released_amount` |

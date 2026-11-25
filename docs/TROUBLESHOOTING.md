@@ -62,7 +62,7 @@ Source: `contracts/interface/src/lib.rs`
 | `#6` | `NotExpired` | Attempted to call `reclaim_expired` before the expiry timestamp. | Funds can only be reclaimed after the safety timelock has passed without activity. |
 | `#7` | `ZeroAmount` | A milestone amount or release amount is zero or negative. | All payment amounts must be strictly greater than zero. |
 | `#8` | `InvalidMilestones` | The milestone array is empty or contains zero milestones. | An escrow must contain at least one milestone. |
-| `#9` | `InvalidExpiry` | The safety expiry timestamp is set in the past or is invalid. | Provide a UNIX timestamp (seconds) strictly in the future. |
+| `#9` | `InvalidExpiry` | The safety expiry timestamp is in the past, or more than 365 days in the future. | Provide a UNIX timestamp (seconds) strictly in the future and at most `MAX_ESCROW_DURATION_SECONDS` (31,536,000 s = 365 days) ahead of the current ledger time. |
 | `#10` | `InvalidCounterparty` | Client and freelancer addresses are identical. | The client and freelancer must be distinct Stellar accounts. |
 | `#11` | `AlreadyInitialized` | `escrow.init()` was called on an already-initialized contract. | The contract is initialized once upon deployment. |
 | `#12` | `NotInitialized` | Contract function called before contract was initialized. | Run `scripts/deploy_testnet.sh` to initialize the contract. |
